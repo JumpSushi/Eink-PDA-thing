@@ -6,6 +6,9 @@ import logging
 import json
 from datetime import datetime, timedelta
 from collections import defaultdict
+from dotenv import load_dotenv
+
+load_dotenv()
 
 class ICSParser:
     def __init__(self, ics_url, cache_dir=None):
@@ -426,7 +429,7 @@ def main():
     print("Starting ICS Parser...")
     
     # Define the URL to fetch the calendar file (using the ID 11016 as provided)
-    ics_url = "https://lionel2.kgv.edu.hk/local/mis/calendar/timetable.php/11016/e637b5e2f8ec8eb6c5690f745facd66c.ics"
+    ics_url = os.getenv("ICS_PARSER_TEST_URL")
     
     # Initialize the parser
     parser = ICSParser(ics_url)

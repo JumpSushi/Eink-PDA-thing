@@ -1,13 +1,16 @@
 #!/usr/bin/python
 # -*- coding:utf-8 -*-
 import os
+from dotenv import load_dotenv
+from datetime import datetime
 import sys
 import time
 import json
 import logging
 import threading
 import socket
-from datetime import datetime
+from bs4 import BeautifulSoup
+import re
 
 libdir = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'lib')
 if os.path.exists(libdir):
@@ -19,6 +22,19 @@ try:
 except ImportError:
     # Create a placeholder that will be replaced when we create the actual file
     ICSParser = None
+
+# Import bulletin utilities
+try:
+    from bulletin_utils import (
+        fetch_bulletin_items, 
+        bulletin_thread_function,
+        draw_bulletin_screen as render_bulletin_screen
+    )
+except ImportError:
+    # Create placeholders if the import fails
+    fetch_bulletin_items = None
+    bulletin_thread_function = None
+    render_bulletin_screen = None
 
 # Setup font directories
 fontdir = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'pic')
@@ -108,9 +124,12 @@ PARTIAL_REFRESHES_BEFORE_FULL = 5
 WEATHER_UPDATE_INTERVAL = 600  # 10 minutes
 STATS_UPDATE_INTERVAL = 5  # Update CPU/memory every 5 seconds
 TIMETABLE_UPDATE_INTERVAL = 3600  # Update timetable hourly (3600 seconds)
-TIMETABLE_URL = "https://lionel2.kgv.edu.hk/local/mis/calendar/timetable.php/11016/399239f79819124fc33606ae94435c66.ics"
+BULLETIN_UPDATE_INTERVAL = 1800  # Update bulletin every 30 minutes (1800 seconds)
+TIMETABLE_URL = os.getenv("TIMETABLE_URL")
+BULLETIN_URL = "https://lionel2.kgv.edu.hk/local/mis/bulletin/bulletin.php"
 
 # Screen states
+BULLETIN_SCREEN = 3  # New state for bulletin screen
 NETWORK_INFO_SCREEN = 2
 MAIN_SCREEN = 1
 TIMETABLE_SCREEN = 0
@@ -128,8 +147,25 @@ try:
 except ImportError:
     psutil = None
 
+# Add queue for bulletin fetching
+import queue
+
+# Add queue for bulletin fetching
+try:
+    import queue
+except ImportError:
+    import Queue as queue  # Python 2 compatibility
+
+# Add threading and queue for bulletin fetching
+import threading
+try:
+    import queue
+except ImportError:
+    import Queue as queue  # Python 2 compatibility
+
 # Load configuration
 def load_config():
+    load_dotenv()
     try:
         with open(CONFIG_PATH) as f:
             config = json.load(f)
@@ -146,6 +182,12 @@ config = load_config()
 # Touch variables
 current_screen = NETWORK_INFO_SCREEN
 touch_event = threading.Event()
+
+# Bulletin screen variables
+bulletin_scroll_position = 0
+bulletin_selected_item = None
+bulletin_content_scroll_position = 0
+bulletin_items = []  # Initialize globally
 
 # Initialize display
 epd = epd2in9_V2.EPD_2IN9_V2()
@@ -320,6 +362,7 @@ def initialize_fonts():
 def touch_detection_thread():
     """Thread function for touch detection using INT pin method"""
     global current_screen, touch_event, touch_thread_running, touch_dev
+    global bulletin_scroll_position, bulletin_selected_item, bulletin_content_scroll_position
     
     logging.info("Touch detection thread started")
     
@@ -359,19 +402,130 @@ def touch_detection_thread():
                     
                     logging.info(f"Touch detected at: {x_pos}, {y_pos}")
                     
+                    # Handle bulletin screen interactions
+                    if current_screen == BULLETIN_SCREEN:
+                        # Check if we're in item detail view
+                        if bulletin_selected_item is not None:
+                            # Back button in top bar when scrolled down
+                            if bulletin_content_scroll_position > 0 and 5 <= x_pos <= 50 and 0 <= y_pos <= 15:
+                                # Return to list view
+                                bulletin_selected_item = None
+                                bulletin_content_scroll_position = 0  # Reset content scroll position
+                                touch_event.set()
+                                last_touch_time = current_time
+                            
+                            # Back button (top left of screen) when not scrolled
+                            elif bulletin_content_scroll_position == 0 and 5 <= x_pos <= 50 and 20 <= y_pos <= 35:
+                                # Return to list view
+                                bulletin_selected_item = None
+                                bulletin_content_scroll_position = 0  # Reset content scroll position
+                                touch_event.set()
+                                last_touch_time = current_time
+                            
+                            # "Return to List" button at the bottom of the last page (expanded clickable area)
+                            elif 5 <= x_pos <= 110 and 116 <= y_pos <= 127:
+                                # Return to list view
+                                bulletin_selected_item = None
+                                bulletin_content_scroll_position = 0  # Reset content scroll position
+                                touch_event.set()
+                                last_touch_time = current_time
+                            
+                            # Content scroll up button
+                            elif bulletin_content_scroll_position > 0 and 270 <= x_pos <= 290 and 45 <= y_pos <= 60:
+                                bulletin_content_scroll_position -= 1
+                                touch_event.set()
+                                last_touch_time = current_time
+                            
+                            # Content scroll down button
+                            elif 270 <= x_pos <= 290 and 95 <= y_pos <= 110:
+                                # Simply increment scroll position by 1
+                                # The actual limit check will happen in the draw function
+                                bulletin_content_scroll_position += 2  # Scroll 1 line at once
+                                touch_event.set()
+                                last_touch_time = current_time
+                                
+                            # Swipe gesture on main content area to scroll
+                            elif 5 <= x_pos <= 260:
+                                # Get the global reference to bulletin_items
+                                global bulletin_items
+                                
+                                # Bottom half of screen - swipe down to scroll up (towards the beginning)
+                                if y_pos >= 80 and bulletin_content_scroll_position > 0:
+                                    bulletin_content_scroll_position -= 1
+                                    touch_event.set()
+                                    last_touch_time = current_time
+                                # Top half of screen - swipe up to scroll down (towards the end)
+                                elif y_pos < 80:
+                                    # Always increment the scroll position
+                                    # The actual limit check will happen in draw_bulletin_screen
+                                    bulletin_content_scroll_position += 2  # Scroll 1 line at once
+                                    touch_event.set()
+                                    last_touch_time = current_time
+                        else:
+                            # Scrolling up button (top right)
+                            if bulletin_scroll_position > 0 and 270 <= x_pos <= 290 and 20 <= y_pos <= 35:
+                                bulletin_scroll_position -= 1
+                                touch_event.set()
+                                last_touch_time = current_time
+                            
+                            # Scrolling down button (bottom right)
+                            elif 270 <= x_pos <= 290 and 95 <= y_pos <= 110:
+                                bulletin_scroll_position += 1
+                                touch_event.set()
+                                last_touch_time = current_time
+                            
+                            # Item selection - updated for new layout with up to 4 items
+                            # Each item is approximately 33px tall (22px + margin)
+                            elif 0 <= x_pos <= 265:
+                                # Get the global reference to bulletin_items
+                                global bulletin_items
+                                
+                                # Make sure bulletin_items exists
+                                if bulletin_items:
+                                    # Determine y position start based on scroll position
+                                    start_y = 25 if bulletin_scroll_position > 0 else 45
+                                    
+                                    # Calculate item positions based on our updated spacing
+                                    item_positions = []
+                                    for i in range(4 if bulletin_scroll_position > 0 else 3):
+                                        item_top = start_y + (i * 33) - 3
+                                        item_bottom = item_top + 25
+                                        item_positions.append((item_top, item_bottom))
+                                    
+                                    # Determine which item was touched
+                                    for i, (top, bottom) in enumerate(item_positions):
+                                        if top <= y_pos <= bottom:
+                                            select_index = bulletin_scroll_position + i
+                                            if 0 <= select_index < len(bulletin_items):
+                                                bulletin_selected_item = select_index
+                                                bulletin_content_scroll_position = 0  # Reset content scroll when selecting new item
+                                                touch_event.set()
+                                                last_touch_time = current_time
+                                                break
+                    
                     # Handle the main navigation button press
-                    if ((current_screen != TIMETABLE_SCREEN and 
+                    if ((current_screen != TIMETABLE_SCREEN and current_screen != BULLETIN_SCREEN and 
                         button_x_min <= x_pos <= button_x_max and button_y_min <= y_pos <= button_y_max) or
                         (current_screen == TIMETABLE_SCREEN and 
                         timetable_button_x_min <= x_pos <= timetable_button_x_max and 
-                        timetable_button_y_min <= y_pos <= timetable_button_y_max)):
+                        timetable_button_y_min <= y_pos <= timetable_button_y_max) or
+                        (current_screen == BULLETIN_SCREEN and
+                        270 <= x_pos <= 295 and 0 <= y_pos <= 15)):
+                        
+                        # Reset bulletin view state when leaving bulletin screen
+                        if current_screen == BULLETIN_SCREEN:
+                            bulletin_scroll_position = 0
+                            bulletin_selected_item = None
+                            bulletin_content_scroll_position = 0
                         
                         # Cycle through screens
                         if current_screen == NETWORK_INFO_SCREEN:
                             current_screen = MAIN_SCREEN
                         elif current_screen == MAIN_SCREEN:
                             current_screen = TIMETABLE_SCREEN
-                        else:  # TIMETABLE_SCREEN
+                        elif current_screen == TIMETABLE_SCREEN:
+                            current_screen = BULLETIN_SCREEN
+                        else:  # BULLETIN_SCREEN
                             current_screen = NETWORK_INFO_SCREEN
                         
                         # Signal main thread to update display
@@ -611,8 +765,52 @@ def draw_timetable_screen(fonts, timetable_data, current_time=None, current_date
     
     return image
 
+# The following functions have been moved to bulletin_utils.py:
+# - fetch_bulletin_items
+# - is_from_student
+# - is_donation_request
+# - is_feedback_request
+# - create_fallback_headline
+# - generate_headline
+# - bulletin_thread_function (modified to accept parameters)
+# - draw_bulletin_screen (reimplemented as wrapper to call the imported version)
+
+# Moved to bulletin_utils.py
+
+# Bulletin thread variables
+bulletin_thread_running = True
+bulletin_queue = None  # Will be initialized in main
+
+def start_bulletin_thread():
+    """Start the bulletin thread function using the imported version if available"""
+    global bulletin_thread_running, bulletin_queue
+    
+    # Set the thread running flag to True
+    bulletin_thread_running = True
+    
+    # Initialize bulletin queue if not already initialized
+    if bulletin_queue is None:
+        bulletin_queue = queue.Queue(maxsize=1)
+    
+    # Use the imported function if available, otherwise use a stub that does nothing
+    if bulletin_thread_function is not None:
+        logging.info("Starting bulletin thread with imported function")
+        thread = threading.Thread(
+            target=bulletin_thread_function, 
+            args=(bulletin_queue, bulletin_thread_running),
+            daemon=True
+        )
+        thread.start()
+        return thread
+    else:
+        # Return a dummy thread object
+        logging.error("Bulletin thread function not available")
+        return None
+
 def main():
-    global touch_thread_running, force_timetable_refresh
+    global touch_thread_running, force_timetable_refresh, bulletin_thread_running, bulletin_queue
+    global bulletin_scroll_position, bulletin_selected_item, bulletin_content_scroll_position
+    global bulletin_items  # Make bulletin_items global
     
     # Initialize display once at startup, no status message or initial clear
     epd.init()
@@ -626,6 +824,13 @@ def main():
     last_network_update = 0
     network_update_interval = 300  # Update network info every 5 minutes
     force_timetable_refresh = False
+    
+    # Initialize bulletin variables
+    bulletin_items = []  # Initialize as empty list
+    bulletin_queue = queue.Queue()  # Thread-safe queue for bulletin items
+    bulletin_scroll_position = 0
+    bulletin_selected_item = None
+    bulletin_content_scroll_position = 0
     
     # Initialize timetable variables
     timetable_parser = None
@@ -667,6 +872,11 @@ def main():
     touch_thread = threading.Thread(target=touch_detection_thread, daemon=True)
     touch_thread.start()
     
+    # Start bulletin fetching thread using our new function
+    bulletin_thread = start_bulletin_thread()
+    
+    # Note: bulletin_queue is already initialized in start_bulletin_thread()
+    
     try:
         while True:
             current_time = time.time()
@@ -685,8 +895,7 @@ def main():
                      stats['mem_usage'] != last_stats['mem_usage'])
                 )
                 # Update last stats values
-                last_stats = stats.copy()
-            
+                last_stats = stats.copy()                    
             # Update weather periodically
             if current_time - last_weather_update > WEATHER_UPDATE_INTERVAL:
                 logging.info("Updating weather data")
@@ -709,6 +918,21 @@ def main():
                     logging.info(f"Timetable updated: {timetable_data}")
                 except Exception as e:
                     logging.error(f"Error updating timetable: {e}")
+                    
+            # Check if there are new bulletin items in the queue
+            if not bulletin_queue.empty():
+                try:
+                    # Get the latest bulletin items from the queue
+                    new_items = bulletin_queue.get_nowait()
+                    # Only update bulletin_items if we actually got items
+                    if new_items:
+                        bulletin_items = new_items
+                        logging.info(f"Main thread: Retrieved {len(bulletin_items)} bulletin items from queue")
+                    else:
+                        logging.warning("Retrieved empty bulletin items list from queue")
+                except Exception as e:
+                    logging.error(f"Error retrieving bulletin items from queue: {e}")
+                    # Don't reset bulletin_items if there was an error, keep using existing items
             
             # Check for touch event
             if touch_event.is_set():
@@ -736,6 +960,13 @@ def main():
                         # Fallback if timetable data is not available
                         image = draw_network_info_screen(fonts, network_info)
                         logging.warning("Timetable data not available, showing network screen instead")
+                elif current_screen == BULLETIN_SCREEN:
+                    # Bulletin screen - use the latest bulletin items from the thread
+                    # We don't need to fetch here as the thread will keep the data updated
+                    image = draw_bulletin_screen(fonts, bulletin_items,
+                                               scroll_position=bulletin_scroll_position,
+                                               selected_item=bulletin_selected_item,
+                                               content_scroll_position=bulletin_content_scroll_position)
                 else:
                     # Main screen - draw with latest time and stats
                     image = draw_time_image(fonts, weather_data, stats)
@@ -792,6 +1023,16 @@ def main():
                         }
                     }
                     image = draw_timetable_screen(fonts, dummy_timetable_data)
+                    
+                    # Increment partial refresh counter for screen transition
+                    partial_refresh_count += 1
+                elif current_screen == BULLETIN_SCREEN:
+                    # Bulletin screen - use the latest bulletin items from the thread
+                    # We don't need to fetch here as the thread will keep the data updated
+                    image = draw_bulletin_screen(fonts, bulletin_items,
+                                               scroll_position=bulletin_scroll_position,
+                                               selected_item=bulletin_selected_item,
+                                               content_scroll_position=bulletin_content_scroll_position)
                     
                     # Increment partial refresh counter for screen transition
                     partial_refresh_count += 1
@@ -884,18 +1125,88 @@ def main():
                     
                     last_minute = current_minute
             
+            # Handle bulletin screen updates
+            elif current_screen == BULLETIN_SCREEN:
+                # Get current time components for time updates
+                current_time_struct = time.localtime()
+                current_minute = current_time_struct.tm_min
+                current_second = current_time_struct.tm_sec
+                
+                # Check if time changed (minute change)
+                time_changed = current_minute != last_minute or (current_second < 2 and last_minute == current_minute)
+                
+                # Update time display if needed
+                if time_changed:
+                    # Get formatted time and date
+                    current_time_str = time.strftime("%H:%M", current_time_struct)
+                    current_date_str = time.strftime("%d/%m/%Y", current_time_struct)
+                    
+                    # Redraw bulletin screen with updated time
+                    image = draw_bulletin_screen(fonts, bulletin_items,
+                                                current_time=current_time_str,
+                                                current_date=current_date_str,
+                                                scroll_position=bulletin_scroll_position,
+                                                selected_item=bulletin_selected_item,
+                                                content_scroll_position=bulletin_content_scroll_position)
+                    
+                    # Partial refresh when time changes
+                    epd.display_Partial(epd.getbuffer(image))
+                    last_minute = current_minute
+                
+                # Just check if we have new bulletin items from the thread
+                elif not bulletin_queue.empty():
+                    try:
+                        # Get the latest bulletin items from the queue
+                        bulletin_items = bulletin_queue.get_nowait()
+                        
+                        # Redraw bulletin screen with latest items
+                        image = draw_bulletin_screen(fonts, bulletin_items,
+                                                   scroll_position=bulletin_scroll_position,
+                                                   selected_item=bulletin_selected_item,
+                                                   content_scroll_position=bulletin_content_scroll_position)
+                        
+                        # Use partial refresh for bulletin updates
+                        epd.display_Partial(epd.getbuffer(image))
+                    except Exception as e:
+                        logging.error(f"Error updating bulletin screen: {e}")
+            
             time.sleep(REFRESH_INTERVAL)
 
     except KeyboardInterrupt:
         logging.info("Cleaning up and exiting")
-        # Signal touch thread to exit
+        # Signal threads to exit
         touch_thread_running = False
-        time.sleep(0.5)  # Give thread time to exit
+        bulletin_thread_running = False
+        time.sleep(0.5)  # Give threads time to exit
         
         # Properly shutdown the display without a full refresh
         epd.sleep()
         epd.Dev_exit()
         sys.exit()
 
+def draw_bulletin_screen(fonts, bulletin_items, current_time=None, current_date=None, scroll_position=0, selected_item=None, content_scroll_position=0):
+    """Wrapper function to call the bulletin_utils version of draw_bulletin_screen"""
+    # Add debug information
+    logging.info(f"Drawing bulletin screen with {len(bulletin_items)} items")
+    
+    if render_bulletin_screen is not None:
+        # Make sure to only pass the expected number of arguments
+        return render_bulletin_screen(epd, fonts, bulletin_items, current_time, current_date, 
+                                     scroll_position, selected_item, content_scroll_position)
+    else:
+        # Fallback if the imported function is not available
+        logging.error("Bulletin rendering function not available")
+        image = Image.new('1', (epd.height, epd.width), 255)
+        draw = ImageDraw.Draw(image)
+        font_lg, font_md, font_sm, font_xs = fonts
+        draw.text((10, 50), "Bulletin module not available", font=font_sm, fill=0)
+        
+        # Apply rotation if needed
+        if config.get('display_rotation') == 180:
+            image = image.rotate(180)
+        
+        return image
+
+# Add the entry point at the end of the file
 if __name__ == '__main__':
     main()
