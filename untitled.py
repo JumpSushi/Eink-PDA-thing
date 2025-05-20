@@ -36,6 +36,16 @@ except ImportError:
     bulletin_thread_function = None
     render_bulletin_screen = None
 
+# Try to import the session management
+try:
+    from lionel_session import get_session_token, get_session_cookies
+    lionel_session_available = True
+except ImportError:
+    get_session_token = None
+    get_session_cookies = None
+    lionel_session_available = False
+    logging.warning("Lionel session management not available")
+
 # Setup font directories
 fontdir = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'pic')
 fonts_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'fonts')
@@ -141,27 +151,21 @@ try:
     import requests
 except ImportError:
     requests = None
+    logging.warning("requests library not found, weather functionality will be disabled.")
 
 try:
     import psutil
 except ImportError:
     psutil = None
-
-# Add queue for bulletin fetching
-import queue
-
-# Add queue for bulletin fetching
-try:
-    import queue
-except ImportError:
-    import Queue as queue  # Python 2 compatibility
+    logging.warning("psutil library not found, some system stats may not be available.")
 
 # Add threading and queue for bulletin fetching
-import threading
 try:
-    import queue
+    import queue # Python 3
 except ImportError:
-    import Queue as queue  # Python 2 compatibility
+    import Queue as queue # Python 2 compatibility
+    logging.info("Using Queue (Python 2) for bulletin items.")
+
 
 # Load configuration
 def load_config():
@@ -173,9 +177,27 @@ def load_config():
                 config['weather_enabled'] = True
             else:
                 config['weather_enabled'] = False
+                
+            # Check for Lionel credentials
+            lionel_username = os.getenv("LIONEL_USERNAME")
+            lionel_password = os.getenv("LIONEL_PASSWORD")
+            
+            if lionel_username and lionel_password:
+                config['lionel_credentials_available'] = True
+                # Initialize the session token if the module is available
+                if get_session_token:
+                    session = get_session_token()
+                    if session:
+                        logging.info("Lionel session token obtained successfully")
+                    else:
+                        logging.error("Failed to get Lionel session token")
+            else:
+                config['lionel_credentials_available'] = False
+                logging.warning("Lionel credentials not available in environment")
+                
             return config
     except (FileNotFoundError, json.JSONDecodeError):
-        return {'weather_enabled': False}
+        return {'weather_enabled': False, 'lionel_credentials_available': False}
 
 config = load_config()
 
@@ -205,7 +227,7 @@ def get_weather():
         return None
     
     # Hardcoded values as requested
-    api_key = 'f3333928c9ffd47f857eab25111ca132'
+    api_key = os.getenv("OPENWEATHERMAP_API_KEY")
     city = 'Hong Kong'
     country_code = 'HK'
     unit = config.get('temperature_unit', 'C')
@@ -363,6 +385,7 @@ def touch_detection_thread():
     """Thread function for touch detection using INT pin method"""
     global current_screen, touch_event, touch_thread_running, touch_dev
     global bulletin_scroll_position, bulletin_selected_item, bulletin_content_scroll_position
+    global bulletin_items, force_full_refresh
     
     logging.info("Touch detection thread started")
     
@@ -411,6 +434,10 @@ def touch_detection_thread():
                                 # Return to list view
                                 bulletin_selected_item = None
                                 bulletin_content_scroll_position = 0  # Reset content scroll position
+                                
+                                # Force a full refresh when exiting an article view
+                                force_full_refresh = True
+                                
                                 touch_event.set()
                                 last_touch_time = current_time
                             
@@ -419,6 +446,10 @@ def touch_detection_thread():
                                 # Return to list view
                                 bulletin_selected_item = None
                                 bulletin_content_scroll_position = 0  # Reset content scroll position
+                                
+                                # Force a full refresh when exiting an article view
+                                force_full_refresh = True
+                                
                                 touch_event.set()
                                 last_touch_time = current_time
                             
@@ -427,6 +458,10 @@ def touch_detection_thread():
                                 # Return to list view
                                 bulletin_selected_item = None
                                 bulletin_content_scroll_position = 0  # Reset content scroll position
+                                
+                                # Force a full refresh when exiting an article view
+                                force_full_refresh = True
+                                
                                 touch_event.set()
                                 last_touch_time = current_time
                             
@@ -443,24 +478,6 @@ def touch_detection_thread():
                                 bulletin_content_scroll_position += 2  # Scroll 1 line at once
                                 touch_event.set()
                                 last_touch_time = current_time
-                                
-                            # Swipe gesture on main content area to scroll
-                            elif 5 <= x_pos <= 260:
-                                # Get the global reference to bulletin_items
-                                global bulletin_items
-                                
-                                # Bottom half of screen - swipe down to scroll up (towards the beginning)
-                                if y_pos >= 80 and bulletin_content_scroll_position > 0:
-                                    bulletin_content_scroll_position -= 1
-                                    touch_event.set()
-                                    last_touch_time = current_time
-                                # Top half of screen - swipe up to scroll down (towards the end)
-                                elif y_pos < 80:
-                                    # Always increment the scroll position
-                                    # The actual limit check will happen in draw_bulletin_screen
-                                    bulletin_content_scroll_position += 2  # Scroll 1 line at once
-                                    touch_event.set()
-                                    last_touch_time = current_time
                         else:
                             # Scrolling up button (top right)
                             if bulletin_scroll_position > 0 and 270 <= x_pos <= 290 and 20 <= y_pos <= 35:
@@ -474,12 +491,8 @@ def touch_detection_thread():
                                 touch_event.set()
                                 last_touch_time = current_time
                             
-                            # Item selection - updated for new layout with up to 4 items
-                            # Each item is approximately 33px tall (22px + margin)
+                            # Item selection maintained but without dragging to scroll
                             elif 0 <= x_pos <= 265:
-                                # Get the global reference to bulletin_items
-                                global bulletin_items
-                                
                                 # Make sure bulletin_items exists
                                 if bulletin_items:
                                     # Determine y position start based on scroll position
@@ -497,8 +510,13 @@ def touch_detection_thread():
                                         if top <= y_pos <= bottom:
                                             select_index = bulletin_scroll_position + i
                                             if 0 <= select_index < len(bulletin_items):
+                                                # Set the article selection
                                                 bulletin_selected_item = select_index
                                                 bulletin_content_scroll_position = 0  # Reset content scroll when selecting new item
+                                                
+                                                # Force a full refresh when entering an article view
+                                                force_full_refresh = True
+                                                
                                                 touch_event.set()
                                                 last_touch_time = current_time
                                                 break
@@ -519,6 +537,7 @@ def touch_detection_thread():
                             bulletin_content_scroll_position = 0
                         
                         # Cycle through screens
+                        old_screen = current_screen
                         if current_screen == NETWORK_INFO_SCREEN:
                             current_screen = MAIN_SCREEN
                         elif current_screen == MAIN_SCREEN:
@@ -527,6 +546,9 @@ def touch_detection_thread():
                             current_screen = BULLETIN_SCREEN
                         else:  # BULLETIN_SCREEN
                             current_screen = NETWORK_INFO_SCREEN
+                        
+                        # Flag to force full refresh when entering or leaving bulletin screen
+                        force_full_refresh = (old_screen == BULLETIN_SCREEN or current_screen == BULLETIN_SCREEN)
                         
                         # Signal main thread to update display
                         touch_event.set()
@@ -562,6 +584,13 @@ def draw_network_info_screen(fonts, network_info):
     
     # Hostname
     draw.text((10, 80), f"Host: {network_info['hostname']}", font=font_sm, fill=0)
+    
+    # Lionel Session Status (if available)
+    if 'lionel_session' in network_info:
+        status_text = "Available" if network_info['lionel_session'] else "Not Available"
+        note_text = "(Not used for bulletin)"
+        draw.text((10, 100), f"Lionel ID: {status_text}", font=font_sm, fill=0)
+        draw.text((35, 115), note_text, font=font_xs, fill=0)
     
     # Draw button
     draw.rectangle([(250, 0), (295, 127)], outline=0)
@@ -613,7 +642,12 @@ def draw_timetable_screen(fonts, timetable_data, current_time=None, current_date
     # Day of week - use smaller font
     day_text = f"{timetable_data['day']}"
     draw.text((5, left_y), day_text, font=font_sm, fill=0)
-    left_y += 20
+    left_y += 15
+    
+    # Add "Tomorrow" on a new line if showing next day's schedule
+    if timetable_data.get("is_next_day", False):
+        draw.text((5, left_y), "(Tomorrow)", font=font_sm, fill=0)
+        left_y += 15
     
     # Display next lesson information
     draw.text((5, left_y), "Next:", font=font_sm, fill=0)
@@ -703,8 +737,14 @@ def draw_timetable_screen(fonts, timetable_data, current_time=None, current_date
     # Get appropriate schedule
     if timetable_data.get("is_weekend", False):
         schedule = timetable_data.get("next_schedule", {})
+        logging.info(f"Drawing timetable for weekend - showing next Monday Week {timetable_data.get('next_week')}")
+    elif timetable_data.get("is_next_day", False):
+        # If we're showing the next day's schedule (after cutoff time on weekday)
+        schedule = timetable_data.get("schedule", {})
+        logging.info(f"Drawing timetable for next day - {timetable_data.get('day')} Week {timetable_data.get('week')}")
     else:
         schedule = timetable_data.get("schedule", {})
+        logging.info(f"Drawing timetable for current day - {timetable_data.get('day')} Week {timetable_data.get('week')}")
     
     # Draw timetable periods - keep period numbers large, but class names smaller
     for period in range(1, 6):
@@ -781,101 +821,39 @@ def draw_timetable_screen(fonts, timetable_data, current_time=None, current_date
 bulletin_thread_running = True
 bulletin_queue = None  # Will be initialized in main
 
-def start_bulletin_thread():
-    """Start the bulletin thread function using the imported version if available"""
-    global bulletin_thread_running, bulletin_queue
-    
-    # Set the thread running flag to True
-    bulletin_thread_running = True
-    
-    # Initialize bulletin queue if not already initialized
-    if bulletin_queue is None:
-        bulletin_queue = queue.Queue(maxsize=1)
-    
-    # Use the imported function if available, otherwise use a stub that does nothing
-    if bulletin_thread_function is not None:
-        logging.info("Starting bulletin thread with imported function")
-        thread = threading.Thread(
-            target=bulletin_thread_function, 
-            args=(bulletin_queue, bulletin_thread_running),
-            daemon=True
-        )
-        thread.start()
-        return thread
-    else:
-        # Return a dummy thread object
-        logging.error("Bulletin thread function not available")
-        return None
-
 def main():
-    global touch_thread_running, force_timetable_refresh, bulletin_thread_running, bulletin_queue
-    global bulletin_scroll_position, bulletin_selected_item, bulletin_content_scroll_position
-    global bulletin_items  # Make bulletin_items global
-    
-    # Initialize display once at startup, no status message or initial clear
+    global epd, current_screen, touch_event, touch_thread_running, touch_dev, touch_old
+    global bulletin_items, bulletin_scroll_position, bulletin_selected_item, bulletin_content_scroll_position
+    global bulletin_queue, bulletin_thread_running, force_full_refresh # Added force_full_refresh
+
+    # Initialize display and touch
     epd.init()
-    
-    # Initialize variables
+    epd.Clear()
+    logging.info("Display initialized")
+
+    # Initialize fonts
     fonts = initialize_fonts()
-    last_weather_update = 0
-    weather_data = None
-    last_minute = int(time.strftime("%M"))
-    partial_refresh_count = 0
-    last_network_update = 0
-    network_update_interval = 300  # Update network info every 5 minutes
-    force_timetable_refresh = False
-    
-    # Initialize bulletin variables
-    bulletin_items = []  # Initialize as empty list
+    logging.info("Fonts initialized")
+
+    # Initialize bulletin queue
     bulletin_queue = queue.Queue()  # Thread-safe queue for bulletin items
-    bulletin_scroll_position = 0
-    bulletin_selected_item = None
-    bulletin_content_scroll_position = 0
-    
-    # Initialize timetable variables
-    timetable_parser = None
-    timetable_data = None
-    last_timetable_update = 0
-    
-    # Try to initialize the timetable parser
-    try:
-        if ICSParser is not None:
-            timetable_parser = ICSParser(TIMETABLE_URL)
-            if timetable_parser.download_timetable() and timetable_parser.parse_timetable():
-                timetable_data = timetable_parser.get_current_day_schedule()
-                logging.info(f"Timetable initialized: {timetable_data}")
-                last_timetable_update = time.time()
-            else:
-                logging.error("Failed to initialize timetable")
-    except Exception as e:
-        logging.error(f"Error initializing timetable: {e}")
-    
-    # Variables to track system stats changes
-    last_stats = {'cpu_temp': None, 'mem_usage': None}
-    stats_only_changed = False
-    last_stats_update = 0  # Track when we last updated stats
-    
-    # Initialize the touch controller
-    touch.ICNT_Init()
-    
-    # Get initial system stats and network info
-    stats = get_system_stats()
-    last_stats = stats.copy()  # Initialize last_stats with the initial values
+
+    # Start touch detection thread
+    touch_thread = threading.Thread(target=touch_detection_thread)
+    touch_thread.daemon = True
+    touch_thread.start()
+    logging.info("Touch detection thread started")
+
+    # Start bulletin fetching thread
+    # bulletin_thread = start_bulletin_thread() # Removed call to empty function
+
+    # Initial network info fetch
     network_info = get_network_info()
     
     # Prepare initial screen once - network info screen by default
     image = draw_network_info_screen(fonts, network_info)
     # Use display_Base only once for the first display
     epd.display_Base(epd.getbuffer(image))
-    
-    # Start touch detection thread
-    touch_thread = threading.Thread(target=touch_detection_thread, daemon=True)
-    touch_thread.start()
-    
-    # Start bulletin fetching thread using our new function
-    bulletin_thread = start_bulletin_thread()
-    
-    # Note: bulletin_queue is already initialized in start_bulletin_thread()
     
     try:
         while True:
@@ -884,18 +862,21 @@ def main():
             # Update system stats periodically rather than every cycle
             stats_updated = False
             if current_time - last_stats_update > STATS_UPDATE_INTERVAL:
-                stats = get_system_stats()
-                last_stats_update = current_time
-                stats_updated = True
-                
-                # Check if only stats changed (not time or other content)
-                stats_only_changed = (
-                    current_screen == MAIN_SCREEN and
-                    (stats['cpu_temp'] != last_stats['cpu_temp'] or 
-                     stats['mem_usage'] != last_stats['mem_usage'])
-                )
-                # Update last stats values
-                last_stats = stats.copy()                    
+                try:
+                    stats = get_system_stats()
+                    last_stats_update = current_time
+                    stats_updated = True
+                    
+                    # Check if only stats changed (not time or other content)
+                    stats_only_changed = (
+                        current_screen == MAIN_SCREEN and
+                        (stats['cpu_temp'] != last_stats['cpu_temp'] or 
+                         stats['mem_usage'] != last_stats['mem_usage'])
+                    )
+                    # Update last stats values
+                    last_stats = stats.copy()
+                except Exception as e:
+                    logging.error(f"Error updating system stats: {e}")                    
             # Update weather periodically
             if current_time - last_weather_update > WEATHER_UPDATE_INTERVAL:
                 logging.info("Updating weather data")
@@ -913,7 +894,7 @@ def main():
                         timetable_parser.parse_timetable(force=True)
                         force_timetable_refresh = False
                     
-                    timetable_data = timetable_parser.get_current_day_schedule()
+                    timetable_data = timetable_parser.get_schedule_for_display()
                     last_timetable_update = current_time
                     logging.info(f"Timetable updated: {timetable_data}")
                 except Exception as e:
@@ -1009,33 +990,52 @@ def main():
                     partial_refresh_count += 1
                 elif current_screen == TIMETABLE_SCREEN:
                     # Timetable screen - draw with latest timetable data
-                    # For now, we'll use dummy timetable data that changes every minute
-                    dummy_timetable_data = {
-                        'week': 1,
-                        'day': 'Mon',
-                        'is_weekend': False,
-                        'schedule': {
-                            '1': [{'class': 'Math', 'time': '08:00'}],
-                            '2': [{'class': 'Science', 'time': '09:00'}],
-                            '3': [{'class': 'History', 'time': '10:00'}],
-                            '4': [{'class': 'English', 'time': '11:00'}],
-                            '5': [{'class': 'PE', 'time': '12:00'}]
+                    if timetable_data:
+                        image = draw_timetable_screen(fonts, timetable_data)
+                    else:
+                        # Fallback to dummy data only if no actual timetable data is available
+                        logging.warning("No timetable data available, using dummy data")
+                        dummy_timetable_data = {
+                            'week': 1,
+                            'day': 'Mon',
+                            'is_weekend': False,
+                            'schedule': {
+                                '1': [{'class': 'Math', 'time': '08:00'}],
+                                '2': [{'class': 'Science', 'time': '09:00'}],
+                                '3': [{'class': 'History', 'time': '10:00'}],
+                                '4': [{'class': 'English', 'time': '11:00'}],
+                                '5': [{'class': 'PE', 'time': '12:00'}]
+                            }
                         }
-                    }
-                    image = draw_timetable_screen(fonts, dummy_timetable_data)
+                        image = draw_timetable_screen(fonts, dummy_timetable_data)
                     
                     # Increment partial refresh counter for screen transition
                     partial_refresh_count += 1
                 elif current_screen == BULLETIN_SCREEN:
                     # Bulletin screen - use the latest bulletin items from the thread
                     # We don't need to fetch here as the thread will keep the data updated
+                    
+                    # Get current state before update
+                    previous_selected_item = bulletin_selected_item
+                    
+                    # Draw new bulletin screen image
                     image = draw_bulletin_screen(fonts, bulletin_items,
                                                scroll_position=bulletin_scroll_position,
                                                selected_item=bulletin_selected_item,
                                                content_scroll_position=bulletin_content_scroll_position)
                     
-                    # Increment partial refresh counter for screen transition
-                    partial_refresh_count += 1
+                    # Check if we entered or exited an article view
+                    if (previous_selected_item is None and bulletin_selected_item is not None) or \
+                       (previous_selected_item is not None and bulletin_selected_item is None):
+                        # Article selection state changed - use full refresh
+                        logging.info("Full refresh - entering or exiting bulletin article")
+                        epd.display_Base(epd.getbuffer(image))
+                        partial_refresh_count = 0  # Reset counter
+                    else:
+                        # Normal bulletin navigation - always use partial refresh
+                        logging.info("Partial refresh - bulletin navigation")
+                        epd.display_Partial(epd.getbuffer(image))
+                        # Don't increment partial_refresh_count for bulletin scrolling
                 else:
                     # Main screen - draw with latest time and stats
                     image = draw_time_image(fonts, weather_data, stats)
@@ -1044,11 +1044,18 @@ def main():
                     partial_refresh_count += 1
                 
                 # Do a full refresh much less frequently to protect the display
-                if partial_refresh_count >= PARTIAL_REFRESHES_BEFORE_FULL:
+                # Exception for bulletin screen - we've already handled its refresh logic above
+                # Also force a full refresh when entering/leaving bulletin screen
+                if force_full_refresh:
+                    logging.info(f"Full refresh - entering or leaving bulletin screen")
+                    epd.display_Base(epd.getbuffer(image))
+                    partial_refresh_count = 0  # Reset counter
+                    force_full_refresh = False  # Reset flag
+                elif current_screen != BULLETIN_SCREEN and partial_refresh_count >= PARTIAL_REFRESHES_BEFORE_FULL:
                     logging.info(f"Full refresh after {PARTIAL_REFRESHES_BEFORE_FULL} partial refreshes")
                     epd.display_Base(epd.getbuffer(image))
                     partial_refresh_count = 0  # Reset counter
-                else:
+                elif current_screen != BULLETIN_SCREEN:
                     # Use partial refresh for most updates to protect the display
                     logging.info(f"Partial refresh ({partial_refresh_count}/{PARTIAL_REFRESHES_BEFORE_FULL})")
                     epd.display_Partial(epd.getbuffer(image))
@@ -1114,8 +1121,13 @@ def main():
                     # Increment partial refresh counter
                     partial_refresh_count += 1
                     
-                    # Do a full refresh periodically
-                    if partial_refresh_count >= PARTIAL_REFRESHES_BEFORE_FULL:
+                    # Do a full refresh if entering/leaving bulletin screen or periodically otherwise
+                    if force_full_refresh:
+                        logging.info(f"Full refresh - entering or leaving bulletin screen")
+                        epd.display_Base(epd.getbuffer(image))
+                        partial_refresh_count = 0
+                        force_full_refresh = False  # Reset flag
+                    elif current_screen != BULLETIN_SCREEN and partial_refresh_count >= PARTIAL_REFRESHES_BEFORE_FULL:
                         logging.info(f"Full refresh after {PARTIAL_REFRESHES_BEFORE_FULL} partial refreshes")
                         epd.display_Base(epd.getbuffer(image))
                         partial_refresh_count = 0
@@ -1123,9 +1135,7 @@ def main():
                         logging.info(f"Partial refresh (timetable time updated) ({partial_refresh_count}/{PARTIAL_REFRESHES_BEFORE_FULL})")
                         epd.display_Partial(epd.getbuffer(image))
                     
-                    last_minute = current_minute
-            
-            # Handle bulletin screen updates
+                    last_minute = current_minute                # Handle bulletin screen updates
             elif current_screen == BULLETIN_SCREEN:
                 # Get current time components for time updates
                 current_time_struct = time.localtime()
@@ -1149,7 +1159,7 @@ def main():
                                                 selected_item=bulletin_selected_item,
                                                 content_scroll_position=bulletin_content_scroll_position)
                     
-                    # Partial refresh when time changes
+                    # Partial refresh when time changes - do NOT increment refresh counter
                     epd.display_Partial(epd.getbuffer(image))
                     last_minute = current_minute
                 
@@ -1165,7 +1175,7 @@ def main():
                                                    selected_item=bulletin_selected_item,
                                                    content_scroll_position=bulletin_content_scroll_position)
                         
-                        # Use partial refresh for bulletin updates
+                        # Use partial refresh for bulletin updates - do NOT increment refresh counter
                         epd.display_Partial(epd.getbuffer(image))
                     except Exception as e:
                         logging.error(f"Error updating bulletin screen: {e}")

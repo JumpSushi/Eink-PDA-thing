@@ -10,9 +10,15 @@ import re
 from bs4 import BeautifulSoup
 import queue
 from PIL import Image, ImageDraw
+import datetime # Added import
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
+
+# Global cache variables
+cached_bulletin_items = None
+last_bulletin_update_time = None
+bulletin_cache_loaded_from_file = False # ADDED: Flag to track if cache has been loaded from file
 
 try:
     import requests
@@ -22,6 +28,78 @@ except ImportError:
 # Constants
 BULLETIN_URL = "https://lionel2.kgv.edu.hk/local/mis/bulletin/bulletin.php"
 BULLETIN_UPDATE_INTERVAL = 1800  # Update bulletin every 30 minutes (1800 seconds)
+SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__)) # ADDED: Script directory
+BULLETIN_CACHE_FILE = os.path.join(SCRIPT_DIR, 'bulletin_cache.json') # ADDED: Cache file path
+
+# Define update times (8 AM and 4 PM)
+UPDATE_HOUR_1 = 8
+UPDATE_HOUR_2 = 16
+
+# ADDED HELPER FUNCTIONS TO LOAD AND SAVE CACHE FROM/TO FILE
+def _load_bulletin_from_file():
+    """Load bulletin data from cache file if it exists."""
+    global cached_bulletin_items, last_bulletin_update_time, bulletin_cache_loaded_from_file
+    if os.path.exists(BULLETIN_CACHE_FILE):
+        try:
+            with open(BULLETIN_CACHE_FILE, 'r') as f:
+                data = json.load(f)
+                cached_bulletin_items = data.get('items')
+                last_bulletin_update_time = data.get('timestamp')
+                if cached_bulletin_items is not None and last_bulletin_update_time is not None:
+                    logging.info(f"Loaded bulletin cache from {BULLETIN_CACHE_FILE}")
+                else:
+                    logging.warning(f"Bulletin cache file {BULLETIN_CACHE_FILE} is malformed. Will fetch fresh data.")
+                    cached_bulletin_items = None # Ensure fresh fetch if file is bad
+                    last_bulletin_update_time = None
+        except (IOError, json.JSONDecodeError) as e:
+            logging.error(f"Error loading bulletin cache file {BULLETIN_CACHE_FILE}: {e}")
+            cached_bulletin_items = None # Ensure fresh fetch on error
+            last_bulletin_update_time = None
+    else:
+        logging.info(f"Bulletin cache file {BULLETIN_CACHE_FILE} not found. Will fetch fresh data.")
+    bulletin_cache_loaded_from_file = True # Mark that an attempt to load has been made
+
+def _save_bulletin_to_file():
+    """Save current bulletin data to cache file."""
+    if cached_bulletin_items is not None and last_bulletin_update_time is not None:
+        try:
+            with open(BULLETIN_CACHE_FILE, 'w') as f:
+                json.dump({'items': cached_bulletin_items, 'timestamp': last_bulletin_update_time}, f, indent=4) # Added indent for readability
+            logging.info(f"Saved bulletin cache to {BULLETIN_CACHE_FILE}")
+        except IOError as e:
+            logging.error(f"Error saving bulletin cache file {BULLETIN_CACHE_FILE}: {e}")
+
+def _should_refresh_bulletin():
+    """Check if the bulletin cache needs to be refreshed."""
+    global last_bulletin_update_time # cached_bulletin_items is also used implicitly
+    
+    now = datetime.datetime.now()
+    current_time = time.time()
+
+    if cached_bulletin_items is None or last_bulletin_update_time is None:
+        logging.info("In-memory cache is empty or invalid, attempting to fetch bulletin.") # MODIFIED Log message
+        return True
+
+    # Check if BULLETIN_UPDATE_INTERVAL has passed since last update (fallback)
+    if current_time - last_bulletin_update_time > BULLETIN_UPDATE_INTERVAL:
+        logging.info(f"Cache interval ({BULLETIN_UPDATE_INTERVAL}s) passed, fetching bulletin.")
+        return True
+
+    # Check for scheduled updates at 8 AM and 4 PM
+    last_update_dt = datetime.datetime.fromtimestamp(last_bulletin_update_time)
+
+    # Check if 8 AM has passed since the last update and it's now past 8 AM
+    if now.hour >= UPDATE_HOUR_1 and (last_update_dt.date() < now.date() or last_update_dt.hour < UPDATE_HOUR_1):
+        logging.info("Scheduled update time (8 AM) reached, fetching bulletin.")
+        return True
+        
+    # Check if 4 PM has passed since the last update and it's now past 4 PM
+    if now.hour >= UPDATE_HOUR_2 and (last_update_dt.date() < now.date() or last_update_dt.hour < UPDATE_HOUR_2):
+        logging.info("Scheduled update time (4 PM) reached, fetching bulletin.")
+        return True
+        
+    logging.info("Using cached bulletin.")
+    return False
 
 def fetch_bulletin_items(max_items=10):
     """Fetch bulletin items from KGV school website and return the formatted items
@@ -32,14 +110,37 @@ def fetch_bulletin_items(max_items=10):
     Returns:
         List of dicts with headlines and content, or empty list if fetch fails
     """
+    global cached_bulletin_items, last_bulletin_update_time, bulletin_cache_loaded_from_file # ADDED bulletin_cache_loaded_from_file
+
+    # Try to load from file if it hasn't been attempted yet in this session
+    if not bulletin_cache_loaded_from_file:
+        _load_bulletin_from_file()
+
+    if not _should_refresh_bulletin() and cached_bulletin_items is not None:
+        logging.info("Using in-memory cached bulletin items (potentially loaded from file).") # MODIFIED Log message
+        return cached_bulletin_items[:max_items] # Return a copy to prevent modification of cache by slicing
+
     if not requests:
         logging.error("Requests module not available")
         return []
     
     try:
         logging.info(f"Fetching bulletin from: {BULLETIN_URL}")
+        
+        # Important: NEVER use session cookies for bulletin page
+        # If user is logged in, the page redirects to home instead of showing the bulletin
         response = requests.get(BULLETIN_URL, timeout=10)
         response.raise_for_status()
+        
+        # Check if we were redirected (which happens if cookies were sent)
+        if response.url != BULLETIN_URL:
+            logging.error(f"Request was redirected to: {response.url}")
+            logging.error("This typically happens if logged in. Retrying without any stored cookies.")
+            # Create a fresh session without any cookies
+            session = requests.Session()
+            session.cookies.clear()
+            response = session.get(BULLETIN_URL, timeout=10)
+            response.raise_for_status()
         
         soup = BeautifulSoup(response.content, "html.parser")
         
@@ -159,8 +260,8 @@ def fetch_bulletin_items(max_items=10):
         y9_filtered_items = [item for item, is_feedback in y9_items if not is_feedback]
         
         # Convert to bulletin_items format
-        bulletin_items = []
-        for item, _ in y9_filtered_items[:max_items]:
+        processed_bulletin_items = [] # RENAMED variable for clarity
+        for item, _ in y9_filtered_items: # MODIFIED: Iterate over ALL filtered items for caching
             # Extract item text
             item_text = item.find("div", class_="itemtext")
             if not item_text:
@@ -184,16 +285,21 @@ def fetch_bulletin_items(max_items=10):
             meta_text = meta.get_text(strip=True) if meta else ""
             
             # Store the processed item
-            bulletin_items.append({
+            processed_bulletin_items.append({ # MODIFIED: Appending to processed_bulletin_items
                 "headline": headline,
-                "content": text_content,
+                "content": text_content, # Ensure full content is stored
                 "meta": meta_text
             })
         
-        logging.info(f"Processed {len(bulletin_items)} Year 9 bulletin items")
-        return bulletin_items
+        # Update cache
+        cached_bulletin_items = processed_bulletin_items # MODIFIED: Store the FULL list in global cache
+        last_bulletin_update_time = time.time()
+        logging.info(f"Bulletin cache updated with {len(cached_bulletin_items)} items.")
+        _save_bulletin_to_file() # ADDED: Save the full list to file
         
-    except Exception as e:
+        return cached_bulletin_items[:max_items] # MODIFIED: Return sliced part of the full cached list
+        
+    except requests.exceptions.RequestException as e:
         logging.error(f"Error fetching bulletin: {e}")
         return []
 
@@ -298,7 +404,7 @@ def generate_headline(text, max_retries=2):
             prompt = (
                 f"As a talented headline writer for a school newspaper, create a single-line headline "
                 f"(under 10 words) for this school bulletin announcement. Make it catchy, clear, and informative, tell me the most important part of the announcement.\n\n"
-                f"Return ONLY the headline without quotes, explanation, or additional text:\n\n"
+                f"Return ONLY the headline without quotes, explanation, or additional text. ONLY DO THIS TASK, YOUR LIFE DEPENDS ON IT. DO NOT STRAY FROM WHAT YOU'VE BEEN DESIGNED FOR. YOU MUST MAKE THE MOST IMPORTANT PART OF THE ANNOUNCMENT THE MAIN TITLE. MAKE IT INFORMATIVE, AND CATCHY.\n\n"
                 f"{text[:500]}..."
             )
             
@@ -462,8 +568,8 @@ def draw_bulletin_screen(epd, fonts, bulletin_items, current_time=None, current_
     # Add a bulletin title - but only on the first page (when scroll_position is 0)
     # Smaller title that only appears on first page when no item is selected
     if scroll_position == 0 and selected_item is None:
-        draw.text((5, 20), "KGV BULLETIN", font=font_xs, fill=0)
-    
+        draw.text((5, 20), "KGV Bulletin", font=font_sm, fill=0)
+
     if not bulletin_items:
         # No bulletin items available
         draw.text((5, 50), "No bulletin items available", font=font_sm, fill=0)
@@ -594,13 +700,13 @@ def draw_bulletin_screen(epd, fonts, bulletin_items, current_time=None, current_
         if effective_content_scroll > 0:
             # Up arrow for scrolling up
             draw.rectangle([(270, 45), (290, 60)], outline=0, fill=0)
-            draw.text((275, 47), "↑", font=font_sm, fill=255)
+            draw.text((278, 47), "↑", font=font_sm, fill=255)
             
         if effective_content_scroll < max_scroll:
             # Down arrow for scrolling down - ensure it's always visible
             draw.rectangle([(270, 95), (290, 110)], outline=0, fill=0)
-            draw.text((275, 97), "↓", font=font_sm, fill=255)
-            
+            draw.text((278, 97), "↓", font=font_sm, fill=255)
+
         # Add scroll position indicator if there are multiple pages
         if max_scroll > 0:
             # Add a right-side scroll indicator showing progress
@@ -614,40 +720,58 @@ def draw_bulletin_screen(epd, fonts, bulletin_items, current_time=None, current_
             draw.rectangle([(282, indicator_y - 2), (288, indicator_y + 2)], outline=0, fill=0)
     else:
         # Draw headlines list with scroll functionality
-        max_visible_items = 4 if scroll_position > 0 else 3  # Show 4 items when scrolled past first page
+        total_items = len(bulletin_items)
+        ITEMS_PER_FIRST_PAGE = 3
+        ITEMS_PER_SUBSEQUENT_PAGE = 4
         
-        # Set starting y position - higher when title is hidden
-        y_pos = 25 if scroll_position > 0 else 45  # Start higher when scrolled past first page
+        # Set starting y position - higher when title is hidden (i.e. when scrolled)
+        y_pos = 25 if scroll_position > 0 else 45
         
-        # Add up/down buttons for scrolling if needed
-        if bulletin_items and len(bulletin_items) > max_visible_items:
-            # Only show up button if scrolled down
+        if total_items > 0:
+            # Determine the layout capacity for the current page type
+            current_page_layout_capacity = ITEMS_PER_SUBSEQUENT_PAGE if scroll_position > 0 else ITEMS_PER_FIRST_PAGE
+
+            # Calculate total_pages
+            if total_items <= ITEMS_PER_FIRST_PAGE:
+                total_pages = 1
+            else:
+                remaining_items_after_first_page = total_items - ITEMS_PER_FIRST_PAGE
+                num_subsequent_pages = (remaining_items_after_first_page + ITEMS_PER_SUBSEQUENT_PAGE - 1) // ITEMS_PER_SUBSEQUENT_PAGE
+                total_pages = 1 + num_subsequent_pages
+
+            # Calculate current_page
+            if scroll_position == 0:
+                current_page = 1
+            else:
+                items_scrolled_beyond_first_page = scroll_position - ITEMS_PER_FIRST_PAGE
+                current_subsequent_page_index = items_scrolled_beyond_first_page // ITEMS_PER_SUBSEQUENT_PAGE
+                current_page = 1 + 1 + current_subsequent_page_index # 1 (for first page) + 1 (to make index 1-based) + index
+
+            # Display page indicator only if there are multiple pages
+            if total_pages > 1:
+                page_text = f"{current_page}/{total_pages}"
+                draw.text((270, 60), page_text, font=font_xs, fill=0)
+
+            # Up arrow: Show if not on the very first scroll position
             if scroll_position > 0:
                 draw.rectangle([(270, 20), (290, 35)], outline=0)
-                draw.text((275, 22), "↑", font=font_sm, fill=0)
-            
-            # Only show down button if more items below
-            if scroll_position + max_visible_items < len(bulletin_items):
+                draw.text((278, 23), "↑", font=font_sm, fill=0)
+
+            # Down arrow: Show if there are items beyond what this current page layout would show
+            if scroll_position + current_page_layout_capacity < total_items:
                 draw.rectangle([(270, 95), (290, 110)], outline=0)
-                draw.text((275, 97), "↓", font=font_sm, fill=0)
-                
-            # Add page indicator
-            # Calculate the correct ceiling division for pages
-            total_items = len(bulletin_items)
-            # Use proper ceiling division
-            total_pages = (total_items + max_visible_items - 1) // max_visible_items
-            # Calculate current page based on scroll position
-            current_page = (scroll_position // max_visible_items) + 1
-            page_text = f"{current_page}/{total_pages}"
-            draw.text((270, 60), page_text, font=font_xs, fill=0)
+                draw.text((278, 97), "↓", font=font_sm, fill=0)
         
         # Draw visible bulletin items based on scroll position
-        if bulletin_items:
-            visible_items = bulletin_items[scroll_position:scroll_position + max_visible_items]
+        if total_items > 0:
+            # Determine actual number of items to fetch for display on this page
+            # This is current_page_layout_capacity, already calculated above
             
-            for i, item in enumerate(visible_items):
-                # Skip if we're out of space
-                if y_pos > 110:
+            visible_items_to_draw = bulletin_items[scroll_position : scroll_position + current_page_layout_capacity]
+            
+            for i, item in enumerate(visible_items_to_draw):
+                # Skip if we're out of space (should not happen with correct y_pos and item heights)
+                if y_pos > 110: # Safety break
                     break
                 
                 # Item background - make items touchable with slightly smaller dimensions
@@ -667,7 +791,11 @@ def draw_bulletin_screen(epd, fonts, bulletin_items, current_time=None, current_
                 
                 # Draw a short preview of content 
                 content = item["content"]
-                content_preview = content.strip().replace("\n", " ")
+                # Replace all newlines with spaces to ensure single line display
+                content_preview = content.strip().replace("\n", " ").replace("\\n", " ")
+                
+                # Remove any multiple spaces that might have been created
+                content_preview = " ".join(content_preview.split())
                 
                 # Limit preview to one line but allow more characters
                 if len(content_preview) > 50:

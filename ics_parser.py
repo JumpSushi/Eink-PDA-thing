@@ -237,9 +237,28 @@ class ICSParser:
                             # Swap weeks 1 and 2 for correct data alignment
                             adjusted_week = 3 - week  # This swaps 1 -> 2 and 2 -> 1
                             
-                            # For week 1: start from offset
-                            # For week 2: start from events_per_week after week 1
-                            idx = offset + ((adjusted_week - 1) * events_per_week) + (adjusted_day_idx * 5) + (period - 1)
+                            # Original idx calculation:
+                            # idx = offset + ((adjusted_week - 1) * events_per_week) + (adjusted_day_idx * 5) + (period - 1)
+
+                            # Corrected idx calculation:
+                            idx_intra_week = (adjusted_day_idx * 5) + (period - 1)
+                            
+                            # Determine the base index for the current adjusted_week's data
+                            if offset == events_per_week and adjusted_week == 2:
+                                # ICS starts with Week 2 (offset=25), and we are currently processing for (timetable label) Week 2.
+                                # Actual Week 2 data is at the beginning of class_list.
+                                idx_base = 0
+                            else:
+                                # This covers:
+                                # 1. ICS starts with Week 1 (offset=0):
+                                #    - For timetable label Week 1 (adjusted_week=1): base = 0 + ((1-1)*25) = 0 (Actual Week 1 data)
+                                #    - For timetable label Week 2 (adjusted_week=2): base = 0 + ((2-1)*25) = 25 (Actual Week 2 data)
+                                # 2. ICS starts with Week 2 (offset=25):
+                                #    - For timetable label Week 1 (adjusted_week=1): base = 25 + ((1-1)*25) = 25 (Actual Week 1 data)
+                                #    (The case for offset=25 and adjusted_week=2 is handled by the 'if' branch above)
+                                idx_base = offset + ((adjusted_week - 1) * events_per_week)
+                            
+                            idx = idx_base + idx_intra_week
                             
                             # Check if we have data for this index
                             if idx < len(class_list) and idx < len(location_list):
@@ -259,11 +278,15 @@ class ICSParser:
                                 # Format the class display
                                 class_display = f"{class_name} in {location}"
                                 
-                                # Add to timetable
+                                # Add to timetable - use the proper week number (from our loop, not adjusted)
+                                # Invert weeks: Fix for issue where Week 1 and Week 2 data were swapped
+                                # The data from the ICS file doesn't align with actual Week 1/Week 2 
+                                # (e.g., What should be Week 1 is labeled as Week 2 in the data)
+                                actual_week = 3 - week  # This inverts the week (1 becomes 2, 2 becomes 1)
                                 self.timetable[day_name][str(period)].append({
                                     'class': class_display,
                                     'time': time_str,
-                                    'week': week,
+                                    'week': actual_week,  # Use the inverted week
                                     'description': f"{class_name} {location}"
                                 })
                                 
@@ -271,12 +294,13 @@ class ICSParser:
                                 base_date = self.reference_date
                                 day_offset = days.index(day_name)
                                 
-                                if week == 1:
+                                # Store the date in the inverted week's list
+                                if actual_week == 1:
                                     week_date = base_date + timedelta(days=day_offset)
-                                else:  # week 2
+                                else:  # actual_week 2
                                     week_date = base_date + timedelta(days=day_offset + 7)
                                     
-                                self.weeks[week].add(week_date.date().isoformat())
+                                self.weeks[actual_week].add(week_date.date().isoformat())
                 
                 logging.info(f"Successfully parsed {len(class_list)} classes from ICS file")
             else:
@@ -328,22 +352,84 @@ class ICSParser:
             
         return current_week
     
+    def clear_cache(self):
+        """Clear the timetable cache, forcing a fresh download on next request"""
+        try:
+            # Delete cache files if they exist
+            if os.path.exists(self.cache_file):
+                os.remove(self.cache_file)
+                logging.info(f"Removed cache file: {self.cache_file}")
+                
+            if os.path.exists(self.parsed_cache_file):
+                os.remove(self.parsed_cache_file)
+                logging.info(f"Removed parsed cache file: {self.parsed_cache_file}")
+                
+            return True
+        except Exception as e:
+            logging.error(f"Error clearing cache: {e}")
+            return False
+    
     def get_day_schedule(self, day_name, week_number=None):
         """Get the schedule for a specific day and week"""
         if week_number is None:
             week_number = self.get_current_week_number()
             
+        logging.info(f"Getting schedule for {day_name}, Week {week_number}")
         day_schedule = {}
+        found_any_classes = False
+        
+        # Log all available classes for this day for debugging
+        for period, classes in self.timetable[day_name].items():
+            for c in classes:
+                logging.debug(f"Available class: Period {period}: {c['class']} (Week {c['week']})")
         
         # Get all periods for the specified day
         for period, classes in self.timetable[day_name].items():
             # Filter classes for the current week and only take the first one
             # (we should only have one unique class per period per week)
             filtered_classes = [c for c in classes if c['week'] == week_number]
+            
             if filtered_classes:
                 # Take only the first class for each period - we eliminated duplicates during parsing
                 day_schedule[period] = [filtered_classes[0]]
+                logging.info(f"Found class for Period {period}: {filtered_classes[0]['class']} (Week {filtered_classes[0]['week']})")
+                found_any_classes = True
+            else:
+                logging.warning(f"Period {period}: No class found for Week {week_number}")
+        
+        # Check if we found any classes for this day/week
+        if not found_any_classes:
+            logging.warning(f"No classes found for {day_name}, Week {week_number}!")
             
+            # Check if we have classes for the other week as a fallback
+            other_week = 1 if week_number == 2 else 2
+            logging.warning(f"Looking for classes for Week {other_week} as fallback...")
+            for period, classes in self.timetable[day_name].items():
+                filtered_classes = [c for c in classes if c['week'] == other_week]
+                if filtered_classes:
+                    logging.warning(f"Found classes for {day_name}, Week {other_week} instead!")
+                    # Add the classes for the other week with a warning indicator
+                    day_schedule[period] = [filtered_classes[0]]
+            
+            # If we still have no classes, try forcing a refresh of the timetable data
+            if not day_schedule:
+                logging.warning(f"Attempting to refresh timetable data for {day_name}, Week {week_number}")
+                self.download_timetable(force=True)
+                self.parse_timetable(force=True)
+                # Try once more after refresh
+                for period, classes in self.timetable[day_name].items():
+                    filtered_classes = [c for c in classes if c['week'] == week_number]
+                    if filtered_classes:
+                        day_schedule[period] = [filtered_classes[0]]
+        
+        # Verify the week numbers in the returned schedule match the requested week
+        for period, classes in day_schedule.items():
+            if classes and classes[0]['week'] != week_number:
+                logging.warning(f"Week number mismatch for {day_name}, Period {period}: " 
+                               f"Expected Week {week_number}, got Week {classes[0]['week']}")
+                # Fix the week number to match what was requested
+                classes[0]['week'] = week_number
+                
         return day_schedule
     
     def get_current_day_schedule(self):
@@ -389,12 +475,149 @@ class ICSParser:
         
         # Regular weekday
         schedule = self.get_day_schedule(day_name, week_number)
-        return {
+        result = {
             "is_weekend": False,
             "day": day_name,
             "week": week_number,
             "schedule": schedule
         }
+        
+        # Add validation to check week numbers match what we expect
+        logging.info("CURRENT DAY SCHEDULE VALIDATION START ---------------")
+        logging.info(f"Expected week number: {week_number}")
+        for period, classes in schedule.items():
+            if classes:
+                if classes[0]['week'] != week_number:
+                    logging.warning(f"⚠️ Week mismatch in period {period}: Expected {week_number}, got {classes[0]['week']}")
+                else:
+                    logging.info(f"✓ Period {period}: {classes[0]['class']} (Week: {classes[0]['week']})")
+        logging.info("CURRENT DAY SCHEDULE VALIDATION END -----------------")
+        
+        return result
+        
+    def get_schedule_for_display(self):
+        """
+        Gets the appropriate schedule for display based on current time and day.
+        Shows next day's schedule if:
+        - It's after 3:20 PM on a regular weekday
+        - It's after 2:05 PM on a Monday
+        
+        Returns:
+            A dictionary with timetable data for display
+        """
+        # Get current time and day
+        current_datetime = datetime.now()
+        day_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+        current_day_name = day_names[current_datetime.weekday()]
+        current_hour = current_datetime.hour
+        current_minute = current_datetime.minute
+        
+        # Check if we should show the next day's schedule based on day and time
+        show_next_day = False
+        
+        # Check if it's a weekday (0-4 means Monday-Friday)
+        if current_datetime.weekday() <= 4:  # It's a weekday
+            if current_day_name == "Monday" and (current_hour > 14 or (current_hour == 14 and current_minute >= 5)):
+                # After 2:05 PM on Monday
+                show_next_day = True
+            elif current_day_name != "Monday" and (current_hour > 15 or (current_hour == 15 and current_minute >= 20)):
+                # After 3:20 PM on other weekdays
+                show_next_day = True
+                
+        # First, get the current day's schedule
+        current_schedule = self.get_current_day_schedule()
+        
+        # If we should show the next day's schedule and it's not already the weekend
+        if show_next_day and not current_schedule.get("is_weekend", False):
+            # Calculate next day
+            next_day_datetime = current_datetime + timedelta(days=1)
+            next_day_idx = next_day_datetime.weekday()
+            
+            # If next day is weekend (Saturday or Sunday), show Monday
+            if next_day_idx >= 5:  # It's a weekend
+                # Use the weekend logic which will show next Monday's schedule
+                return self.get_current_day_schedule()
+            else:
+                # Get next day's name
+                next_day_name = day_names[next_day_idx]
+                
+                # Calculate week number for the next day based on the reference date
+                # This ensures consistent week calculation based on the actual date
+                # rather than special-casing certain day transitions
+                next_day_date = current_datetime.date() + timedelta(days=1)
+                
+                # Get current week number to check if we're staying in the same week
+                current_week_number = self.get_current_week_number()
+                
+                # For all day transitions within a work week (Monday through Friday),
+                # we should stay in the same week number. Only when transitioning to a new
+                # work week (Sunday -> Monday) should the week number potentially change.
+                
+                # Check if we're still within the same work week (Monday to Friday)
+                if current_datetime.weekday() < 5 and next_day_idx < 5:
+                    # Use current week number for the next day
+                    next_week_number = current_week_number
+                    logging.info(f"Staying in the same week {next_week_number} when moving from {current_day_name} to {next_day_name}")
+                else:
+                    # For week transitions (Friday -> Saturday, Saturday -> Sunday, Sunday -> Monday),
+                    # calculate using the reference date
+                    days_from_reference = (next_day_date - self.reference_date.date()).days
+                    
+                    # Calculate how many weeks have passed since the reference date
+                    weeks_passed = days_from_reference // 7
+                    
+                    # The week number alternates between 1 and 2
+                    next_week_number = (self.reference_week + weeks_passed) % 2
+                    if next_week_number == 0:
+                        next_week_number = 2
+                    logging.info(f"Calculated new week {next_week_number} when moving from {current_day_name} to {next_day_name}")
+                    
+                # Get the schedule for the next day
+                next_day_schedule = self.get_day_schedule(next_day_name, next_week_number)
+                
+                # Log the schedule details for debugging
+                logging.info(f"Next day schedule - Day: {next_day_name}, Week: {next_week_number}")
+                for period, classes in next_day_schedule.items():
+                    if classes:
+                        # Check if the class's actual week matches the requested week
+                        if classes[0]['week'] != next_week_number:
+                            logging.warning(f"Period {period}: Class week mismatch! Requested Week {next_week_number}, got {classes[0]['week']}")
+                        logging.info(f"Period {period}: {classes[0]['class']} (Week {classes[0]['week']})")
+                
+                # Construct the result similar to get_current_day_schedule output
+                result = {
+                    "is_weekend": False,
+                    "day": next_day_name,
+                    "week": next_week_number,
+                    "schedule": next_day_schedule,
+                    "is_next_day": True  # Flag to indicate this is the next day's schedule
+                }
+                
+                # Add additional validation at the end to ensure week numbers match what we expect
+                logging.info("SCHEDULE VALIDATION START ---------------")
+                logging.info(f"Expected week number: {next_week_number}")
+                for period, classes in next_day_schedule.items():
+                    if classes:
+                        if classes[0]['week'] != next_week_number:
+                            logging.warning(f"⚠️ Week mismatch in period {period}: Expected {next_week_number}, got {classes[0]['week']}")
+                        else:
+                            logging.info(f"✓ Period {period}: {classes[0]['class']} (Week: {classes[0]['week']})")
+                logging.info("SCHEDULE VALIDATION END -----------------")
+                
+                return result
+        
+        # Final sanity check - let's directly check what week flags the classes have
+        logging.info("🔍 DIRECT CLASS DATA VERIFICATION 🔍")
+        weekday = datetime.now().weekday()
+        if weekday < 5:  # Only for weekdays (0-4)
+            day_name = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"][weekday]
+            logging.info(f"Checking raw data for {day_name}:")
+            for period, classes in self.timetable[day_name].items():
+                for class_info in classes:
+                    logging.info(f"  Period {period}: {class_info['class']} (Week: {class_info['week']})")
+        
+        # Default: return current day's schedule
+        return current_schedule
 
 def print_full_timetable(parser):
     """Print the full timetable for both weeks"""
@@ -402,6 +625,20 @@ def print_full_timetable(parser):
     
     days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
     weeks = [1, 2]
+    
+    current_week = parser.get_current_week_number()
+    print(f"Current week: {current_week}")
+    print(f"Reference date: {parser.reference_date.strftime('%A, %B %d, %Y')} (Week {parser.reference_week})")
+    today = datetime.now()
+    print(f"Today's date: {today.strftime('%A, %B %d, %Y')}")
+    days_from_reference = (today.date() - parser.reference_date.date()).days
+    print(f"Days from reference: {days_from_reference}")
+    weeks_passed = days_from_reference // 7
+    print(f"Weeks passed: {weeks_passed}")
+    calc_week = (parser.reference_week + weeks_passed) % 2
+    if calc_week == 0:
+        calc_week = 2
+    print(f"Calculated week: {calc_week}")
     
     for week_number in weeks:
         print(f"\n--- WEEK {week_number} ---")
@@ -419,7 +656,40 @@ def print_full_timetable(parser):
             for period in periods:
                 for class_info in schedule[period]:
                     time_range = parser.period_times[day_name][period]
-                    print(f"  Period {period} ({time_range}): {class_info['class']}")
+                    print(f"  Period {period} ({time_range}): {class_info['class']} (Week flag: {class_info['week']})")
+    
+    print("\n=============================")
+
+# Add a utility function to debug week numbering and class filtering
+def debug_timetable_data(parser):
+    print("\n===== DEBUGGING TIMETABLE DATA =====")
+    today = datetime.now()
+    current_week = parser.get_current_week_number()
+    
+    # Print key timetable data
+    print(f"Today's date: {today.strftime('%A, %B %d, %Y')}")
+    print(f"Reference date: {parser.reference_date.strftime('%A, %B %d, %Y')} (Week {parser.reference_week})")
+    print(f"Current calculated week: {current_week}")
+    
+    # Print raw class data for today's day
+    day_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    day_name = day_names[today.weekday()]
+    
+    print(f"\nRaw class data for {day_name}:")
+    for period, classes in parser.timetable[day_name].items():
+        for class_info in classes:
+            print(f"  Period {period}: {class_info['class']} (Week: {class_info['week']})")
+    
+    # Print filtered classes for both weeks
+    for week in [1, 2]:
+        print(f"\nFiltered classes for {day_name}, Week {week}:")
+        day_schedule = {}
+        for period, classes in parser.timetable[day_name].items():
+            filtered_classes = [c for c in classes if c['week'] == week]
+            if filtered_classes:
+                day_schedule[period] = filtered_classes
+                for class_info in filtered_classes:
+                    print(f"  Period {period}: {class_info['class']} (Week: {class_info['week']})")
     
     print("\n=============================")
 
@@ -436,6 +706,7 @@ def main():
     
     # Force fresh download and parse
     print("Downloading fresh ICS file...")
+    parser.clear_cache()  # Clear the cache first
     download_success = parser.download_timetable(force=True)
     
     if download_success:
@@ -467,6 +738,9 @@ def main():
             
             # Print the full timetable for reference
             print_full_timetable(parser)
+            
+            # Run debugging to analyze timetable data in detail
+            debug_timetable_data(parser)
         else:
             print("Failed to parse ICS file")
     else:
