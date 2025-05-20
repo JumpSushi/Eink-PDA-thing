@@ -1,16 +1,16 @@
 #!/usr/bin/python
 # -*- coding:utf-8 -*-
-import os
 from dotenv import load_dotenv
 from datetime import datetime
+import os
 import sys
-import time
 import json
+import time
 import logging
-import threading
 import socket
-from bs4 import BeautifulSoup
-import re
+import threading
+import queue
+import subprocess # Add subprocess import
 
 libdir = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'lib')
 if os.path.exists(libdir):
@@ -20,31 +20,19 @@ if os.path.exists(libdir):
 try:
     from ics_parser import ICSParser
 except ImportError:
-    # Create a placeholder that will be replaced when we create the actual file
-    ICSParser = None
+    ICSParser = None # Placeholder
 
 # Import bulletin utilities
 try:
     from bulletin_utils import (
-        fetch_bulletin_items, 
+        fetch_bulletin_items,
         bulletin_thread_function,
         draw_bulletin_screen as render_bulletin_screen
     )
 except ImportError:
-    # Create placeholders if the import fails
     fetch_bulletin_items = None
     bulletin_thread_function = None
     render_bulletin_screen = None
-
-# Try to import the session management
-try:
-    from lionel_session import get_session_token, get_session_cookies
-    lionel_session_available = True
-except ImportError:
-    get_session_token = None
-    get_session_cookies = None
-    lionel_session_available = False
-    logging.warning("Lionel session management not available")
 
 # Setup font directories
 fontdir = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'pic')
@@ -53,93 +41,27 @@ if not os.path.exists(fonts_dir):
     os.makedirs(fonts_dir, exist_ok=True)
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), 'config.json')
-FONT_PATH = os.path.join(fontdir, 'Font.ttc')  # Keep original font path for backup
+FONT_PATH = os.path.join(fontdir, 'Font.ttc')
 REDHAT_REGULAR_PATH = os.path.join(fonts_dir, 'RedHatDisplay-Regular.ttf')
 REDHAT_MEDIUM_PATH = os.path.join(fonts_dir, 'RedHatDisplay-Medium.ttf')
 REDHAT_BOLD_PATH = os.path.join(fonts_dir, 'RedHatDisplay-Bold.ttf')
 
 from PIL import Image, ImageDraw, ImageFont
-import urllib.request
-import zipfile
-import tempfile
-import shutil
-from TP_lib import epd2in9_V2
-from TP_lib import icnt86
-
-# Function to download Red Hat Display fonts if they don't exist
-def download_redhat_fonts():
-    # Font URL provided by the user (downloads as a zip)
-    font_zip_url = "https://github.com/RedHatOfficial/RedHatFont/archive/refs/tags/4.1.0.zip"
-    
-    # Check if any of the fonts are missing
-    fonts_missing = (
-        not os.path.exists(REDHAT_REGULAR_PATH) or
-        not os.path.exists(REDHAT_MEDIUM_PATH) or
-        not os.path.exists(REDHAT_BOLD_PATH)
-    )
-    
-    if fonts_missing:
-        try:
-            logging.info("Downloading Red Hat Display font zip file")
-            
-            # Create a temporary directory to extract the zip
-            with tempfile.TemporaryDirectory() as temp_dir:
-                # Download the zip file to the temporary directory
-                zip_path = os.path.join(temp_dir, "redhat.zip")
-                urllib.request.urlretrieve(font_zip_url, zip_path)
-                logging.info("Font zip downloaded successfully")
-                
-                # Extract the zip file
-                with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                    zip_ref.extractall(temp_dir)
-                logging.info("Font zip extracted successfully")
-                
-                # Map the font files we need to their expected locations
-                font_files = {
-                    "RedHatDisplay-Regular.ttf": REDHAT_REGULAR_PATH,
-                    "RedHatDisplay-Medium.ttf": REDHAT_MEDIUM_PATH,
-                    "RedHatDisplay-Bold.ttf": REDHAT_BOLD_PATH
-                }
-                
-                # Find and copy the font files to their destinations
-                found_fonts = False
-                for root, dirs, files in os.walk(temp_dir):
-                    for file in files:
-                        if file in font_files:
-                            src_path = os.path.join(root, file)
-                            dest_path = font_files[file]
-                            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-                            shutil.copy2(src_path, dest_path)
-                            logging.info(f"Copied {file} to {dest_path}")
-                            found_fonts = True
-                
-                if not found_fonts:
-                    logging.error("Could not find the expected font files in the zip")
-                    return False
-                
-                return True
-                
-        except Exception as e:
-            logging.error(f"Error downloading or extracting fonts: {e}")
-            return False
-    
-    # All fonts are already present
-    return True
-
-# Configuration paths
+from TP_lib import epd2in9_V2 # Hardware specific, will error on dev machine
+from TP_lib import icnt86   # Hardware specific, will error on dev machine
 
 # Constants
-REFRESH_INTERVAL = 0.1  # Seconds between updates (reduced from 0 to lower CPU usage)
+REFRESH_INTERVAL = 0.1
 PARTIAL_REFRESHES_BEFORE_FULL = 5
 WEATHER_UPDATE_INTERVAL = 600  # 10 minutes
-STATS_UPDATE_INTERVAL = 5  # Update CPU/memory every 5 seconds
-TIMETABLE_UPDATE_INTERVAL = 3600  # Update timetable hourly (3600 seconds)
-BULLETIN_UPDATE_INTERVAL = 1800  # Update bulletin every 30 minutes (1800 seconds)
+STATS_UPDATE_INTERVAL = 5
+TIMETABLE_UPDATE_INTERVAL = 3600  # 1 hour
+BULLETIN_UPDATE_INTERVAL = 1800  # 30 minutes
 TIMETABLE_URL = os.getenv("TIMETABLE_URL")
 BULLETIN_URL = "https://lionel2.kgv.edu.hk/local/mis/bulletin/bulletin.php"
 
 # Screen states
-BULLETIN_SCREEN = 3  # New state for bulletin screen
+BULLETIN_SCREEN = 3
 NETWORK_INFO_SCREEN = 2
 MAIN_SCREEN = 1
 TIMETABLE_SCREEN = 0
@@ -151,21 +73,6 @@ try:
     import requests
 except ImportError:
     requests = None
-    logging.warning("requests library not found, weather functionality will be disabled.")
-
-try:
-    import psutil
-except ImportError:
-    psutil = None
-    logging.warning("psutil library not found, some system stats may not be available.")
-
-# Add threading and queue for bulletin fetching
-try:
-    import queue # Python 3
-except ImportError:
-    import Queue as queue # Python 2 compatibility
-    logging.info("Using Queue (Python 2) for bulletin items.")
-
 
 # Load configuration
 def load_config():
@@ -177,27 +84,9 @@ def load_config():
                 config['weather_enabled'] = True
             else:
                 config['weather_enabled'] = False
-                
-            # Check for Lionel credentials
-            lionel_username = os.getenv("LIONEL_USERNAME")
-            lionel_password = os.getenv("LIONEL_PASSWORD")
-            
-            if lionel_username and lionel_password:
-                config['lionel_credentials_available'] = True
-                # Initialize the session token if the module is available
-                if get_session_token:
-                    session = get_session_token()
-                    if session:
-                        logging.info("Lionel session token obtained successfully")
-                    else:
-                        logging.error("Failed to get Lionel session token")
-            else:
-                config['lionel_credentials_available'] = False
-                logging.warning("Lionel credentials not available in environment")
-                
             return config
     except (FileNotFoundError, json.JSONDecodeError):
-        return {'weather_enabled': False, 'lionel_credentials_available': False}
+        return {'weather_enabled': False}
 
 config = load_config()
 
@@ -224,155 +113,200 @@ touch_thread_running = True
 
 def get_weather():
     if not requests:
+        logging.warning("Requests library not available. Cannot fetch weather.")
         return None
-    
-    # Hardcoded values as requested
+
     api_key = os.getenv("OPENWEATHERMAP_API_KEY")
+    if not api_key:
+        logging.warning("OpenWeatherMap API key not found in environment variables.")
+        return None
+
     city = 'Hong Kong'
     country_code = 'HK'
     unit = config.get('temperature_unit', 'C')
+    units_param = 'metric' if unit == 'C' else 'imperial'
+    
+    url = f"http://api.openweathermap.org/data/2.5/weather?q={city},{country_code}&appid={api_key}&units={units_param}"
     
     try:
-        units = 'metric' if unit == 'C' else 'imperial'
-        url = f"http://api.openweathermap.org/data/2.5/weather?q={city},{country_code}&appid={api_key}&units={units}"
         response = requests.get(url, timeout=10)
+        response.raise_for_status()  # Raises an HTTPError for bad responses (4XX or 5XX)
         data = response.json()
-        if data['cod'] != 200:
+        
+        if data.get('cod') != 200:
+            logging.error(f"Weather API error: {data.get('message', 'Unknown error')}")
             return None
+            
+        temp = data.get('main', {}).get('temp')
+        description = data.get('weather', [{}])[0].get('description')
+
+        if temp is None or description is None:
+            logging.error("Weather data incomplete in API response.")
+            return None
+
         return {
-            'temp': data['main']['temp'],
-            'description': data['weather'][0]['description']
+            'temp': temp,
+            'description': description
         }
-    except Exception as e:
-        logging.error(f"Weather error: {e}")
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Weather request failed: {e}")
+        return None
+    except json.JSONDecodeError as e:
+        logging.error(f"Failed to decode weather API response: {e}")
+        return None
+    except Exception as e: # Catch any other unexpected errors
+        logging.error(f"An unexpected error occurred in get_weather: {e}")
         return None
 
 def get_system_stats():
-    stats = {}
-    
-    # CPU Temperature
+    """Get system statistics like CPU temperature and memory usage."""
+    stats = {'cpu_temp': None, 'mem_usage': None}
+
+    # CPU Temperature (Raspberry Pi specific)
     try:
-        res = os.popen('vcgencmd measure_temp').readline()
-        stats['cpu_temp'] = float(res.replace("temp=", "").replace("'C\n", ""))
-    except:
-        stats['cpu_temp'] = None
-    
-    # Memory Usage - first try psutil
-    stats['mem_usage'] = None
-    if psutil:
-        try:
-            mem = psutil.virtual_memory()
-            stats['mem_usage'] = mem.percent
-        except:
-            pass
-    
-    # If psutil fails, try free command
-    if stats['mem_usage'] is None:
-        try:
-            cmd = "free | grep Mem | awk '{print int($3/$2 * 100)}'"
-            res = os.popen(cmd).readline()
-            stats['mem_usage'] = int(res.strip())
-        except:
-            stats['mem_usage'] = None
-    
+        # Use subprocess for better error handling and to capture output
+        result = subprocess.check_output(['vcgencmd', 'measure_temp'], text=True)
+        # Example output: temp=45.5'C
+        stats['cpu_temp'] = float(result.split('=')[1].split("'")[0])
+    except FileNotFoundError:
+        # vcgencmd not found, likely not a Raspberry Pi or not in PATH
+        logging.info("vcgencmd command not found. CPU temperature not available.")
+    except (IndexError, ValueError, subprocess.CalledProcessError) as e:
+        logging.warning(f"Could not parse CPU temperature: {e}")
+    except Exception as e: # Catch any other unexpected errors
+        logging.error(f"An unexpected error occurred while getting CPU temperature: {e}")
+
+    # Memory Usage - using free command
+    try:
+        # Use subprocess for the free command
+        result = subprocess.check_output("free | grep Mem | awk '{print int($3/$2 * 100)}'", shell=True, text=True)
+        stats['mem_usage'] = int(result.strip())
+    except (ValueError, subprocess.CalledProcessError) as e:
+        logging.warning(f"'free' command failed to get memory usage: {e}")
+    except Exception as e: # Catch any other unexpected errors
+        logging.error(f"An unexpected error occurred while getting memory usage with 'free': {e}")
+            
     return stats
 
 def draw_time_image(fonts, weather_data, stats):
-    font_lg, font_md, font_sm, font_xs = fonts  # Updated to unpack 4 fonts
-    image = Image.new('1', (epd.height, epd.width), 255)
+    font_lg, font_md, font_sm, _ = fonts  # Unpack needed fonts, ignore xs
+    image = Image.new('1', (epd.height, epd.width), 255)  # White background
     draw = ImageDraw.Draw(image)
     
-    # Get current time and date using a single time call for consistency
-    now = time.localtime()
-    current_time = time.strftime("%H:%M", now)
-    current_date = time.strftime("%Y-%m-%d", now)
+    now = datetime.now()
+    current_time = now.strftime("%H:%M")
+    current_date = now.strftime("%Y-%m-%d")
     
-    # Draw time
+    # Draw time and date
     draw.text((20, 10), current_time, font=font_lg, fill=0)
-    # Draw date
     draw.text((20, 45), current_date, font=font_md, fill=0)
     
     # Draw weather
     y_pos = 80
     if weather_data:
-        weather_text = f"{weather_data['temp']:.1f}°{config.get('temperature_unit', 'C')} {weather_data['description']}"
+        temp_unit = config.get('temperature_unit', 'C')
+        weather_text = f"{weather_data['temp']:.1f}°{temp_unit} {weather_data['description']}"
         draw.text((20, y_pos), weather_text[:32], font=font_md, fill=0)
-        y_pos += 25
+        y_pos += 25 # Increment y_pos for next element
     
-    # System stats - CPU and Memory on same line with fixed positioning
-    if stats['cpu_temp'] is not None:
-        # Draw CPU temperature at fixed position
-        draw.text((20, y_pos), f"CPU: {stats['cpu_temp']}°C", font=font_sm, fill=0)
-        
-        # Draw Memory usage right after CPU with fixed offset
-        if stats['mem_usage'] is not None:
-            draw.text((100, y_pos), f"Mem: {stats['mem_usage']}%", font=font_sm, fill=0)
+    # System stats
+    if stats.get('cpu_temp') is not None:
+        cpu_text = f"CPU: {stats['cpu_temp']}°C"
+        draw.text((20, y_pos), cpu_text, font=font_sm, fill=0)
+        if stats.get('mem_usage') is not None:
+            mem_text = f"Mem: {stats['mem_usage']}%"
+            draw.text((100, y_pos), mem_text, font=font_sm, fill=0) # Positioned to the right of CPU temp
     
-    # Draw button
-    draw.rectangle([(250, 0), (295, 127)], outline=0)
-    draw.text((255, 60), "Info", font=font_sm, fill=0)
+    # Draw button for Info screen
+    draw.rectangle([(250, 0), (295, 127)], outline=0) # Button border
+    draw.text((255, 60), "Info", font=font_sm, fill=0)   # Button text
     
-    # Apply rotation if needed
     if config.get('display_rotation') == 180:
         image = image.rotate(180)
     
     return image
 
 def get_network_info():
-    """Get network information including WiFi, IP address and hostname"""
+    """Get network information including WiFi SSID, IP address, and hostname."""
     info = {
-        'wifi': "Unknown",
-        'ip': "Unknown",
-        'hostname': "pda.local"
+        'wifi': "N/A",
+        'ip': "N/A",
+        'hostname': "pda.local"  # Default, can be overridden
     }
-    
-    # Try to get hostname
+
+    # Get hostname
     try:
         hostname = socket.gethostname()
-        info['hostname'] = f"{hostname}.local"
-    except:
-        pass
-    
+        if hostname: # Ensure hostname is not empty
+            info['hostname'] = f"{hostname}.local"
+    except socket.gaierror as e:
+        logging.warning(f"Could not get hostname: {e}. Using default '{info['hostname']}'.")
+    except Exception as e:
+        logging.error(f"Unexpected error getting hostname: {e}. Using default '{info['hostname']}'.")
+
     # Get IP address
+    s = None # Ensure s is defined for finally block
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
+        s.settimeout(1.0) # Add a timeout to prevent long hangs
+        s.connect(("8.8.8.8", 80))  # Connect to a known external server (doesn't send data)
         info['ip'] = s.getsockname()[0]
-        s.close()
-    except:
-        pass
-    
-    # Get WiFi network name
+    except socket.timeout:
+        logging.warning("Timeout when trying to get IP address. Network might be down or slow.")
+    except OSError as e: # Catches socket.error and other OS-level errors
+        logging.warning(f"Could not get IP address: {e}")
+    except Exception as e:
+        logging.error(f"Unexpected error getting IP address: {e}")
+    finally:
+        if s:
+            s.close()
+
+    # Get WiFi network name (SSID) - Linux specific using iwgetid
     try:
-        cmd = "iwgetid -r"
-        wifi_name = os.popen(cmd).read().strip()
-        if wifi_name:
-            info['wifi'] = wifi_name
-    except:
-        pass
-    
+        process = subprocess.run(['iwgetid', '-r'], capture_output=True, text=True, check=False, timeout=5)
+        if process.returncode == 0:
+            wifi_name = process.stdout.strip()
+            if wifi_name:
+                info['wifi'] = wifi_name
+            else:
+                logging.info("iwgetid returned empty string, possibly not connected to WiFi.")
+                info['wifi'] = "Not Connected"
+        else:
+            error_message = process.stderr.strip() if process.stderr else process.stdout.strip()
+            if "No such device" in error_message or "Not connected" in error_message or not error_message:
+                 logging.info(f"Not connected to a WiFi network or wireless interface down (iwgetid output: '{error_message}').")
+                 info['wifi'] = "Not Connected"
+            else:
+                logging.warning(f"iwgetid failed to get WiFi SSID: {error_message}")
+    except FileNotFoundError:
+        logging.info("iwgetid command not found. Cannot determine WiFi SSID. (This is normal if not on Linux or wireless_tools not installed)")
+    except subprocess.TimeoutExpired:
+        logging.warning("Timeout when trying to run iwgetid.")
+    except Exception as e:
+        logging.error(f"An unexpected error occurred while getting WiFi SSID: {e}")
+        
     return info
 
 def initialize_fonts():
     """Initialize fonts without refreshing the display"""
     logging.info("Initializing fonts")
     
-    # First, try to download Red Hat Display fonts if they don't exist
-    fonts_available = download_redhat_fonts()
-    
-    if fonts_available:
-        try:
-            # Use Red Hat Display fonts
+    # Attempt to use Red Hat Display fonts first
+    try:
+        if all(os.path.exists(p) for p in [REDHAT_BOLD_PATH, REDHAT_MEDIUM_PATH, REDHAT_REGULAR_PATH]):
+            logging.info("Using Red Hat Display fonts")
             return (
                 ImageFont.truetype(REDHAT_BOLD_PATH, 24),
                 ImageFont.truetype(REDHAT_MEDIUM_PATH, 18), 
                 ImageFont.truetype(REDHAT_REGULAR_PATH, 12),
                 ImageFont.truetype(REDHAT_REGULAR_PATH, 10)  # Extra small font for timetable
             )
-        except Exception as e:
-            logging.error(f"Error loading Red Hat fonts: {e}")
+        else:
+            logging.warning("Red Hat Display fonts not found. Falling back to default font.")
+    except Exception as e:
+        logging.error(f"Error loading Red Hat fonts: {e}. Falling back to default font.")
     
-    # Fallback to default font if Red Hat fonts not available
+    # Fallback to default font
     logging.info("Using default font")
     return (
         ImageFont.truetype(FONT_PATH, 24),
@@ -382,188 +316,204 @@ def initialize_fonts():
     )
 
 def touch_detection_thread():
-    """Thread function for touch detection using INT pin method"""
-    global current_screen, touch_event, touch_thread_running, touch_dev
+    """Thread function for touch detection using INT pin method."""
+    # Globals accessed by this thread and its helpers
+    global current_screen, touch_event, touch_thread_running, touch_dev, touch_old
     global bulletin_scroll_position, bulletin_selected_item, bulletin_content_scroll_position
     global bulletin_items, force_full_refresh
-    
+
     logging.info("Touch detection thread started")
-    
-    # Initialize touch controller
+
+    # Initialize touch controller (assuming touch is a global object)
     touch.ICNT_Init()
-    
+
     # Variables for touch debounce
     last_touch_time = 0
     debounce_time = 0.3  # Reduced to 0.3 seconds for faster response
+
+    # --- Touch Area Constants ---
+    # Common navigation button (right side of screen)
+    NAV_BUTTON_COMMON_X_MIN, NAV_BUTTON_COMMON_X_MAX = 250, 295
+    NAV_BUTTON_COMMON_Y_MIN, NAV_BUTTON_COMMON_Y_MAX = 0, 127
+
+    # Navigation button for Timetable screen (smaller, top right)
+    NAV_BUTTON_TIMETABLE_X_MIN, NAV_BUTTON_TIMETABLE_X_MAX = 270, 295
+    NAV_BUTTON_TIMETABLE_Y_MIN, NAV_BUTTON_TIMETABLE_Y_MAX = 0, 15
+
+    # Navigation button for Bulletin screen (top right, acts as "Next")
+    NAV_BUTTON_BULLETIN_X_MIN, NAV_BUTTON_BULLETIN_X_MAX = 270, 295
+    NAV_BUTTON_BULLETIN_Y_MIN, NAV_BUTTON_BULLETIN_Y_MAX = 0, 15
+
+    # Bulletin screen specific areas
+    BULLETIN_BACK_BUTTON_SCROLLED_X_MIN, BULLETIN_BACK_BUTTON_SCROLLED_X_MAX = 5, 50
+    BULLETIN_BACK_BUTTON_SCROLLED_Y_MIN, BULLETIN_BACK_BUTTON_SCROLLED_Y_MAX = 0, 15
+
+    BULLETIN_BACK_BUTTON_TOP_X_MIN, BULLETIN_BACK_BUTTON_TOP_X_MAX = 5, 50
+    BULLETIN_BACK_BUTTON_TOP_Y_MIN, BULLETIN_BACK_BUTTON_TOP_Y_MAX = 20, 35
     
-    # Common button area (right side of screen)
-    button_x_min = 250  # Right side of screen
-    button_x_max = 295
-    button_y_min = 0
-    button_y_max = 127
+    BULLETIN_RETURN_TO_LIST_BOTTOM_X_MIN, BULLETIN_RETURN_TO_LIST_BOTTOM_X_MAX = 5, 110
+    BULLETIN_RETURN_TO_LIST_BOTTOM_Y_MIN, BULLETIN_RETURN_TO_LIST_BOTTOM_Y_MAX = 116, 127
+
+    BULLETIN_CONTENT_SCROLL_UP_X_MIN, BULLETIN_CONTENT_SCROLL_UP_X_MAX = 270, 290
+    BULLETIN_CONTENT_SCROLL_UP_Y_MIN, BULLETIN_CONTENT_SCROLL_UP_Y_MAX = 45, 60
+
+    BULLETIN_CONTENT_SCROLL_DOWN_X_MIN, BULLETIN_CONTENT_SCROLL_DOWN_X_MAX = 270, 290
+    BULLETIN_CONTENT_SCROLL_DOWN_Y_MIN, BULLETIN_CONTENT_SCROLL_DOWN_Y_MAX = 95, 110
+
+    BULLETIN_LIST_SCROLL_UP_X_MIN, BULLETIN_LIST_SCROLL_UP_X_MAX = 270, 290
+    BULLETIN_LIST_SCROLL_UP_Y_MIN, BULLETIN_LIST_SCROLL_UP_Y_MAX = 20, 35
+
+    BULLETIN_LIST_SCROLL_DOWN_X_MIN, BULLETIN_LIST_SCROLL_DOWN_X_MAX = 270, 290
+    BULLETIN_LIST_SCROLL_DOWN_Y_MIN, BULLETIN_LIST_SCROLL_DOWN_Y_MAX = 95, 110
     
-    # Special case for timetable screen which has a smaller button at the top
-    timetable_button_x_min = 270
-    timetable_button_x_max = 295
-    timetable_button_y_min = 0
-    timetable_button_y_max = 15
-    
-    # Main touch detection loop
+    BULLETIN_ITEM_SELECT_AREA_X_MAX = 265
+
+
+    def _is_touch_in_area(x, y, x_min, x_max, y_min, y_max):
+        return x_min <= x <= x_max and y_min <= y <= y_max
+
+    # --- Helper function for bulletin screen interactions ---
+    def _handle_bulletin_interactions(x, y):
+        nonlocal last_touch_time # To update it if action is taken
+        global bulletin_selected_item, bulletin_content_scroll_position, force_full_refresh
+        global bulletin_scroll_position, bulletin_items, touch_event
+
+        action_taken = False
+        current_time_val = time.time() # Get current time for potential update
+
+        if bulletin_selected_item is not None:  # Viewing an item's content
+            # Back button (scrolled content)
+            if bulletin_content_scroll_position > 0 and _is_touch_in_area(x,y, BULLETIN_BACK_BUTTON_SCROLLED_X_MIN, BULLETIN_BACK_BUTTON_SCROLLED_X_MAX, BULLETIN_BACK_BUTTON_SCROLLED_Y_MIN, BULLETIN_BACK_BUTTON_SCROLLED_Y_MAX):
+                bulletin_selected_item = None
+                bulletin_content_scroll_position = 0
+                force_full_refresh = True
+                action_taken = True
+            # Back button (top of content)
+            elif bulletin_content_scroll_position == 0 and _is_touch_in_area(x,y, BULLETIN_BACK_BUTTON_TOP_X_MIN, BULLETIN_BACK_BUTTON_TOP_X_MAX, BULLETIN_BACK_BUTTON_TOP_Y_MIN, BULLETIN_BACK_BUTTON_TOP_Y_MAX):
+                bulletin_selected_item = None
+                bulletin_content_scroll_position = 0
+                force_full_refresh = True
+                action_taken = True
+            # "Return to List" button at bottom
+            elif _is_touch_in_area(x,y, BULLETIN_RETURN_TO_LIST_BOTTOM_X_MIN, BULLETIN_RETURN_TO_LIST_BOTTOM_X_MAX, BULLETIN_RETURN_TO_LIST_BOTTOM_Y_MIN, BULLETIN_RETURN_TO_LIST_BOTTOM_Y_MAX):
+                bulletin_selected_item = None
+                bulletin_content_scroll_position = 0
+                force_full_refresh = True
+                action_taken = True
+            # Content scroll up
+            elif bulletin_content_scroll_position > 0 and _is_touch_in_area(x,y, BULLETIN_CONTENT_SCROLL_UP_X_MIN, BULLETIN_CONTENT_SCROLL_UP_X_MAX, BULLETIN_CONTENT_SCROLL_UP_Y_MIN, BULLETIN_CONTENT_SCROLL_UP_Y_MAX):
+                bulletin_content_scroll_position -= 1
+                action_taken = True
+            # Content scroll down
+            elif _is_touch_in_area(x,y, BULLETIN_CONTENT_SCROLL_DOWN_X_MIN, BULLETIN_CONTENT_SCROLL_DOWN_X_MAX, BULLETIN_CONTENT_SCROLL_DOWN_Y_MIN, BULLETIN_CONTENT_SCROLL_DOWN_Y_MAX):
+                bulletin_content_scroll_position += 2 # Scroll 2 lines
+                action_taken = True
+        else:  # Viewing the list of bulletin items
+            # List scroll up
+            if bulletin_scroll_position > 0 and _is_touch_in_area(x,y, BULLETIN_LIST_SCROLL_UP_X_MIN, BULLETIN_LIST_SCROLL_UP_X_MAX, BULLETIN_LIST_SCROLL_UP_Y_MIN, BULLETIN_LIST_SCROLL_UP_Y_MAX):
+                bulletin_scroll_position -= 1
+                action_taken = True
+            # List scroll down
+            elif _is_touch_in_area(x,y, BULLETIN_LIST_SCROLL_DOWN_X_MIN, BULLETIN_LIST_SCROLL_DOWN_X_MAX, BULLETIN_LIST_SCROLL_DOWN_Y_MIN, BULLETIN_LIST_SCROLL_DOWN_Y_MAX):
+                bulletin_scroll_position += 1
+                action_taken = True
+            # Item selection
+            elif x <= BULLETIN_ITEM_SELECT_AREA_X_MAX and bulletin_items:
+                start_y = 25 if bulletin_scroll_position > 0 else 45 # Copied from original logic
+                item_height_plus_spacing = 33 # Approx height + spacing
+                items_on_screen = 4 if bulletin_scroll_position > 0 else 3
+
+                for i in range(items_on_screen):
+                    item_top = start_y + (i * item_height_plus_spacing) - 3
+                    item_bottom = item_top + 25 # Approx item clickable height
+                    if item_top <= y <= item_bottom:
+                        select_index = bulletin_scroll_position + i
+                        if 0 <= select_index < len(bulletin_items):
+                            bulletin_selected_item = select_index
+                            bulletin_content_scroll_position = 0
+                            force_full_refresh = True
+                            action_taken = True
+                            break
+        
+        if action_taken:
+            last_touch_time = current_time_val
+            touch_event.set()
+        return action_taken
+
+    # --- Helper function for main navigation ---
+    def _handle_main_navigation_press(x, y):
+        nonlocal last_touch_time
+        global current_screen, force_full_refresh, touch_event
+        global bulletin_scroll_position, bulletin_selected_item, bulletin_content_scroll_position
+
+        action_taken = False
+        current_time_val = time.time()
+
+        nav_button_pressed = False
+        if current_screen == TIMETABLE_SCREEN and \
+           _is_touch_in_area(x, y, NAV_BUTTON_TIMETABLE_X_MIN, NAV_BUTTON_TIMETABLE_X_MAX, NAV_BUTTON_TIMETABLE_Y_MIN, NAV_BUTTON_TIMETABLE_Y_MAX):
+            nav_button_pressed = True
+        elif current_screen == BULLETIN_SCREEN and \
+             _is_touch_in_area(x, y, NAV_BUTTON_BULLETIN_X_MIN, NAV_BUTTON_BULLETIN_X_MAX, NAV_BUTTON_BULLETIN_Y_MIN, NAV_BUTTON_BULLETIN_Y_MAX):
+            nav_button_pressed = True
+        elif current_screen not in [TIMETABLE_SCREEN, BULLETIN_SCREEN] and \
+             _is_touch_in_area(x, y, NAV_BUTTON_COMMON_X_MIN, NAV_BUTTON_COMMON_X_MAX, NAV_BUTTON_COMMON_Y_MIN, NAV_BUTTON_COMMON_Y_MAX):
+            nav_button_pressed = True
+
+        if nav_button_pressed:
+            action_taken = True
+            old_screen = current_screen
+
+            if current_screen == BULLETIN_SCREEN:
+                bulletin_scroll_position = 0
+                bulletin_selected_item = None
+                bulletin_content_scroll_position = 0
+            
+            # Cycle through screens
+            if current_screen == NETWORK_INFO_SCREEN: current_screen = MAIN_SCREEN
+            elif current_screen == MAIN_SCREEN: current_screen = TIMETABLE_SCREEN
+            elif current_screen == TIMETABLE_SCREEN: current_screen = BULLETIN_SCREEN
+            else:  # Was BULLETIN_SCREEN
+                current_screen = NETWORK_INFO_SCREEN
+            
+            force_full_refresh = (old_screen == BULLETIN_SCREEN or current_screen == BULLETIN_SCREEN)
+        
+        if action_taken:
+            last_touch_time = current_time_val
+            touch_event.set()
+        return action_taken
+
+    # --- Main touch detection loop ---
     while touch_thread_running:
         try:
-            # Check if the INT pin is low (touch detected)
-            if touch.digital_read(touch.INT) == 0:
+            if touch.digital_read(touch.INT) == 0:  # Touch detected
                 touch_dev.Touch = 1
-                
-                # Get touch data
-                touch.ICNT_Scan(touch_dev, touch_old)
-                
+                touch.ICNT_Scan(touch_dev, touch_old) # Populate touch_dev
+
                 current_time = time.time()
-                if touch_dev.TouchCount > 0 and current_time - last_touch_time > debounce_time:
-                    x_pos = touch_dev.X[0]
-                    y_pos = touch_dev.Y[0]
+                if touch_dev.TouchCount > 0 and (current_time - last_touch_time > debounce_time):
+                    x_pos, y_pos = touch_dev.X[0], touch_dev.Y[0]
                     
-                    logging.info(f"Touch detected at: {x_pos}, {y_pos}")
-                    
-                    # Handle bulletin screen interactions
+                    processed_by_bulletin_interaction = False
                     if current_screen == BULLETIN_SCREEN:
-                        # Check if we're in item detail view
-                        if bulletin_selected_item is not None:
-                            # Back button in top bar when scrolled down
-                            if bulletin_content_scroll_position > 0 and 5 <= x_pos <= 50 and 0 <= y_pos <= 15:
-                                # Return to list view
-                                bulletin_selected_item = None
-                                bulletin_content_scroll_position = 0  # Reset content scroll position
-                                
-                                # Force a full refresh when exiting an article view
-                                force_full_refresh = True
-                                
-                                touch_event.set()
-                                last_touch_time = current_time
-                            
-                            # Back button (top left of screen) when not scrolled
-                            elif bulletin_content_scroll_position == 0 and 5 <= x_pos <= 50 and 20 <= y_pos <= 35:
-                                # Return to list view
-                                bulletin_selected_item = None
-                                bulletin_content_scroll_position = 0  # Reset content scroll position
-                                
-                                # Force a full refresh when exiting an article view
-                                force_full_refresh = True
-                                
-                                touch_event.set()
-                                last_touch_time = current_time
-                            
-                            # "Return to List" button at the bottom of the last page (expanded clickable area)
-                            elif 5 <= x_pos <= 110 and 116 <= y_pos <= 127:
-                                # Return to list view
-                                bulletin_selected_item = None
-                                bulletin_content_scroll_position = 0  # Reset content scroll position
-                                
-                                # Force a full refresh when exiting an article view
-                                force_full_refresh = True
-                                
-                                touch_event.set()
-                                last_touch_time = current_time
-                            
-                            # Content scroll up button
-                            elif bulletin_content_scroll_position > 0 and 270 <= x_pos <= 290 and 45 <= y_pos <= 60:
-                                bulletin_content_scroll_position -= 1
-                                touch_event.set()
-                                last_touch_time = current_time
-                            
-                            # Content scroll down button
-                            elif 270 <= x_pos <= 290 and 95 <= y_pos <= 110:
-                                # Simply increment scroll position by 1
-                                # The actual limit check will happen in the draw function
-                                bulletin_content_scroll_position += 2  # Scroll 1 line at once
-                                touch_event.set()
-                                last_touch_time = current_time
-                        else:
-                            # Scrolling up button (top right)
-                            if bulletin_scroll_position > 0 and 270 <= x_pos <= 290 and 20 <= y_pos <= 35:
-                                bulletin_scroll_position -= 1
-                                touch_event.set()
-                                last_touch_time = current_time
-                            
-                            # Scrolling down button (bottom right)
-                            elif 270 <= x_pos <= 290 and 95 <= y_pos <= 110:
-                                bulletin_scroll_position += 1
-                                touch_event.set()
-                                last_touch_time = current_time
-                            
-                            # Item selection maintained but without dragging to scroll
-                            elif 0 <= x_pos <= 265:
-                                # Make sure bulletin_items exists
-                                if bulletin_items:
-                                    # Determine y position start based on scroll position
-                                    start_y = 25 if bulletin_scroll_position > 0 else 45
-                                    
-                                    # Calculate item positions based on our updated spacing
-                                    item_positions = []
-                                    for i in range(4 if bulletin_scroll_position > 0 else 3):
-                                        item_top = start_y + (i * 33) - 3
-                                        item_bottom = item_top + 25
-                                        item_positions.append((item_top, item_bottom))
-                                    
-                                    # Determine which item was touched
-                                    for i, (top, bottom) in enumerate(item_positions):
-                                        if top <= y_pos <= bottom:
-                                            select_index = bulletin_scroll_position + i
-                                            if 0 <= select_index < len(bulletin_items):
-                                                # Set the article selection
-                                                bulletin_selected_item = select_index
-                                                bulletin_content_scroll_position = 0  # Reset content scroll when selecting new item
-                                                
-                                                # Force a full refresh when entering an article view
-                                                force_full_refresh = True
-                                                
-                                                touch_event.set()
-                                                last_touch_time = current_time
-                                                break
-                    
-                    # Handle the main navigation button press
-                    if ((current_screen != TIMETABLE_SCREEN and current_screen != BULLETIN_SCREEN and 
-                        button_x_min <= x_pos <= button_x_max and button_y_min <= y_pos <= button_y_max) or
-                        (current_screen == TIMETABLE_SCREEN and 
-                        timetable_button_x_min <= x_pos <= timetable_button_x_max and 
-                        timetable_button_y_min <= y_pos <= timetable_button_y_max) or
-                        (current_screen == BULLETIN_SCREEN and
-                        270 <= x_pos <= 295 and 0 <= y_pos <= 15)):
-                        
-                        # Reset bulletin view state when leaving bulletin screen
-                        if current_screen == BULLETIN_SCREEN:
-                            bulletin_scroll_position = 0
-                            bulletin_selected_item = None
-                            bulletin_content_scroll_position = 0
-                        
-                        # Cycle through screens
-                        old_screen = current_screen
-                        if current_screen == NETWORK_INFO_SCREEN:
-                            current_screen = MAIN_SCREEN
-                        elif current_screen == MAIN_SCREEN:
-                            current_screen = TIMETABLE_SCREEN
-                        elif current_screen == TIMETABLE_SCREEN:
-                            current_screen = BULLETIN_SCREEN
-                        else:  # BULLETIN_SCREEN
-                            current_screen = NETWORK_INFO_SCREEN
-                        
-                        # Flag to force full refresh when entering or leaving bulletin screen
-                        force_full_refresh = (old_screen == BULLETIN_SCREEN or current_screen == BULLETIN_SCREEN)
-                        
-                        # Signal main thread to update display
-                        touch_event.set()
-                        last_touch_time = current_time
-                
-                # Reset touch flag
-                touch_dev.Touch = 0
-                time.sleep(0.05)  # Small delay for debounce
+                        if _handle_bulletin_interactions(x_pos, y_pos):
+                            processed_by_bulletin_interaction = True
+                    if not processed_by_bulletin_interaction: # Only try navigation if bulletin internal action wasn't primary
+                         _handle_main_navigation_press(x_pos, y_pos)
+                    elif current_screen == BULLETIN_SCREEN : # If bulletin interaction happened, still check its specific nav button
+                        _handle_main_navigation_press(x_pos, y_pos)
+
+
+                touch_dev.Touch = 0 # Reset touch flag
+                time.sleep(0.05)  # Small delay
             else:
                 touch_dev.Touch = 0
                 time.sleep(0.01)  # Short sleep when no touch
                 
         except Exception as e:
             logging.error(f"Touch error: {e}")
-            time.sleep(0.5)
+            # Potentially add more specific error handling or re-initialization if needed
+            time.sleep(0.5) # Longer sleep on error
     
     logging.info("Touch detection thread exiting")
 
@@ -584,13 +534,6 @@ def draw_network_info_screen(fonts, network_info):
     
     # Hostname
     draw.text((10, 80), f"Host: {network_info['hostname']}", font=font_sm, fill=0)
-    
-    # Lionel Session Status (if available)
-    if 'lionel_session' in network_info:
-        status_text = "Available" if network_info['lionel_session'] else "Not Available"
-        note_text = "(Not used for bulletin)"
-        draw.text((10, 100), f"Lionel ID: {status_text}", font=font_sm, fill=0)
-        draw.text((35, 115), note_text, font=font_xs, fill=0)
     
     # Draw button
     draw.rectangle([(250, 0), (295, 127)], outline=0)
@@ -737,14 +680,11 @@ def draw_timetable_screen(fonts, timetable_data, current_time=None, current_date
     # Get appropriate schedule
     if timetable_data.get("is_weekend", False):
         schedule = timetable_data.get("next_schedule", {})
-        logging.info(f"Drawing timetable for weekend - showing next Monday Week {timetable_data.get('next_week')}")
     elif timetable_data.get("is_next_day", False):
         # If we're showing the next day's schedule (after cutoff time on weekday)
         schedule = timetable_data.get("schedule", {})
-        logging.info(f"Drawing timetable for next day - {timetable_data.get('day')} Week {timetable_data.get('week')}")
     else:
         schedule = timetable_data.get("schedule", {})
-        logging.info(f"Drawing timetable for current day - {timetable_data.get('day')} Week {timetable_data.get('week')}")
     
     # Draw timetable periods - keep period numbers large, but class names smaller
     for period in range(1, 6):
@@ -805,55 +745,106 @@ def draw_timetable_screen(fonts, timetable_data, current_time=None, current_date
     
     return image
 
-# The following functions have been moved to bulletin_utils.py:
-# - fetch_bulletin_items
-# - is_from_student
-# - is_donation_request
-# - is_feedback_request
-# - create_fallback_headline
-# - generate_headline
-# - bulletin_thread_function (modified to accept parameters)
-# - draw_bulletin_screen (reimplemented as wrapper to call the imported version)
-
-# Moved to bulletin_utils.py
-
 # Bulletin thread variables
 bulletin_thread_running = True
-bulletin_queue = None  # Will be initialized in main
+bulletin_queue = None
+
+def start_bulletin_thread():
+    """Start the bulletin thread function using the imported version if available"""
+    global bulletin_thread_running, bulletin_queue
+    
+    # Set the thread running flag to True
+    bulletin_thread_running = True
+    
+    # Initialize bulletin queue if not already initialized
+    if bulletin_queue is None:
+        bulletin_queue = queue.Queue(maxsize=1)
+    
+    # Use the imported function if available, otherwise use a stub that does nothing
+    if bulletin_thread_function is not None:
+        logging.info("Starting bulletin thread with imported function")
+        thread = threading.Thread(
+            target=bulletin_thread_function, 
+            args=(bulletin_queue, bulletin_thread_running),
+            daemon=True
+        )
+        thread.start()
+        return thread
+    else:
+        # Return a dummy thread object
+        logging.error("Bulletin thread function not available")
+        return None
 
 def main():
-    global epd, current_screen, touch_event, touch_thread_running, touch_dev, touch_old
-    global bulletin_items, bulletin_scroll_position, bulletin_selected_item, bulletin_content_scroll_position
-    global bulletin_queue, bulletin_thread_running, force_full_refresh # Added force_full_refresh
-
-    # Initialize display and touch
+    global touch_thread_running, force_timetable_refresh, bulletin_thread_running, bulletin_queue
+    global bulletin_scroll_position, bulletin_selected_item, bulletin_content_scroll_position
+    global bulletin_items, force_full_refresh  # Make variables global
+    
+    # Initialize display once at startup, no status message or initial clear
     epd.init()
-    epd.Clear()
-    logging.info("Display initialized")
-
-    # Initialize fonts
+    
+    # Initialize variables
     fonts = initialize_fonts()
-    logging.info("Fonts initialized")
-
-    # Initialize bulletin queue
+    last_weather_update = 0
+    weather_data = None
+    last_minute = int(time.strftime("%M"))
+    partial_refresh_count = 0
+    last_network_update = 0
+    network_update_interval = 300  # Update network info every 5 minutes
+    force_timetable_refresh = False
+    force_full_refresh = False
+    
+    # Initialize bulletin variables
+    bulletin_items = []  # Initialize as empty list
     bulletin_queue = queue.Queue()  # Thread-safe queue for bulletin items
-
-    # Start touch detection thread
-    touch_thread = threading.Thread(target=touch_detection_thread)
-    touch_thread.daemon = True
-    touch_thread.start()
-    logging.info("Touch detection thread started")
-
-    # Start bulletin fetching thread
-    # bulletin_thread = start_bulletin_thread() # Removed call to empty function
-
-    # Initial network info fetch
+    bulletin_scroll_position = 0
+    bulletin_selected_item = None
+    bulletin_content_scroll_position = 0
+    
+    # Initialize timetable variables
+    timetable_parser = None
+    timetable_data = None
+    last_timetable_update = 0
+    
+    # Try to initialize the timetable parser
+    try:
+        if ICSParser is not None:
+            timetable_parser = ICSParser(TIMETABLE_URL)
+            if timetable_parser.download_timetable() and timetable_parser.parse_timetable():
+                timetable_data = timetable_parser.get_schedule_for_display()
+                last_timetable_update = current_time
+                logging.info(f"Timetable initialized: {timetable_data}")
+            else:
+                logging.error("Failed to initialize timetable")
+    except Exception as e:
+        logging.error(f"Error initializing timetable: {e}")
+    
+    # Variables to track system stats changes
+    last_stats = {'cpu_temp': None, 'mem_usage': None}
+    stats_only_changed = False
+    last_stats_update = 0  # Track when we last updated stats
+    
+    # Initialize the touch controller
+    touch.ICNT_Init()
+    
+    # Get initial system stats and network info
+    stats = get_system_stats()
+    last_stats = stats.copy()  # Initialize last_stats with the initial values
     network_info = get_network_info()
     
     # Prepare initial screen once - network info screen by default
     image = draw_network_info_screen(fonts, network_info)
     # Use display_Base only once for the first display
     epd.display_Base(epd.getbuffer(image))
+    
+    # Start touch detection thread
+    touch_thread = threading.Thread(target=touch_detection_thread, daemon=True)
+    touch_thread.start()
+    
+    # Start bulletin fetching thread using our new function
+    bulletin_thread = start_bulletin_thread()
+    
+    # Note: bulletin_queue is already initialized in start_bulletin_thread()
     
     try:
         while True:
@@ -993,21 +984,9 @@ def main():
                     if timetable_data:
                         image = draw_timetable_screen(fonts, timetable_data)
                     else:
-                        # Fallback to dummy data only if no actual timetable data is available
-                        logging.warning("No timetable data available, using dummy data")
-                        dummy_timetable_data = {
-                            'week': 1,
-                            'day': 'Mon',
-                            'is_weekend': False,
-                            'schedule': {
-                                '1': [{'class': 'Math', 'time': '08:00'}],
-                                '2': [{'class': 'Science', 'time': '09:00'}],
-                                '3': [{'class': 'History', 'time': '10:00'}],
-                                '4': [{'class': 'English', 'time': '11:00'}],
-                                '5': [{'class': 'PE', 'time': '12:00'}]
-                            }
-                        }
-                        image = draw_timetable_screen(fonts, dummy_timetable_data)
+                        # Fallback if timetable data is not available
+                        logging.warning("No timetable data available, showing network screen instead")
+                        image = draw_network_info_screen(fonts, network_info)
                     
                     # Increment partial refresh counter for screen transition
                     partial_refresh_count += 1
@@ -1208,7 +1187,7 @@ def draw_bulletin_screen(fonts, bulletin_items, current_time=None, current_date=
         logging.error("Bulletin rendering function not available")
         image = Image.new('1', (epd.height, epd.width), 255)
         draw = ImageDraw.Draw(image)
-        font_lg, font_md, font_sm, font_xs = fonts
+        _, _, font_sm, _ = fonts  # Only font_sm is used in the fallback implementation
         draw.text((10, 50), "Bulletin module not available", font=font_sm, fill=0)
         
         # Apply rotation if needed
