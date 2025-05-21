@@ -10,7 +10,7 @@ created_at: "2024-05-15"
 I'm using a touch E-Paper Screen from waveshare. I'm choosing it specifically because of it's ease of use 
 and good documentation from waveshare. 
 
-Well, the parts arrived today, very exciting. Originally, this wasn't a hackclub project, it just so happpens that highway launched so coincidentally. 
+I should clarify that this screen is from a friend of mine, and he happened to use it for another project before. 
 
 Today, I soldered the 40pin GPIO headers to my Pi Zero 2 W, and connected the E-Paper Hat onto it. 
 
