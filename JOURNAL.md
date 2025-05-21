@@ -7,6 +7,9 @@ created_at: "2024-05-15"
 
 # May 15th: Time Spent: 3hrs
 
+I'm using a touch E-Paper Screen from waveshare. I'm choosing it specifically because of it's ease of use 
+and good documentation from waveshare. 
+
 Well, the parts arrived today, very exciting. Originally, this wasn't a hackclub project, it just so happpens that highway launched so coincidentally. 
 
 Today, I soldered the 40pin GPIO headers to my Pi Zero 2 W, and connected the E-Paper Hat onto it. 
@@ -45,12 +48,30 @@ What I was running was actually the demo code for the 2.19 inch version of this 
 
 Well, after all that, finnaly got the demo to work. (yay!)
 
+<<<<<<< Updated upstream
 ![my inability to read english](img/demo_code.JPG)
 
 Thank you for reading my horrible journal so far. I'll get started on the main program tommorow
 
 Time Spent: 3hrs.
 Total Time Spent: 3hrs.
+=======
+![demo screen](img/demo_code.JPG)
+>>>>>>> Stashed changes
 
 
+After that, made a quick python file that shows the time, to test the partial refresh ability of the screen.
+(it works!)
+
+<video width="100%" controls>
+  <source src="img/partial.mp4" type="video/mp4">
+</video>
+
+Thank you for reading my horrible journal so far. I'll get started on the main program tommorow
+
+***Time Spent: 3hrs.***
+**Total Time Spent: 3hrs.**
+
+
+# May 16th: Time Spent: 3hrs
 
