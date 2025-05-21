@@ -48,16 +48,12 @@ What I was running was actually the demo code for the 2.19 inch version of this 
 
 Well, after all that, finnaly got the demo to work. (yay!)
 
-<<<<<<< Updated upstream
 ![my inability to read english](img/demo_code.JPG)
 
 Thank you for reading my horrible journal so far. I'll get started on the main program tommorow
 
 Time Spent: 3hrs.
 Total Time Spent: 3hrs.
-=======
-![demo screen](img/demo_code.JPG)
->>>>>>> Stashed changes
 
 
 After that, made a quick python file that shows the time, to test the partial refresh ability of the screen.
