@@ -63,6 +63,8 @@ After that, made a quick python file that shows the time, to test the partial re
   <source src="img/partial.mp4" type="video/mp4">
 </video>
 
+the video is at img/partial.mp4
+
 Thank you for reading my horrible journal so far. I'll get started on the main program tommorow
 
 ***Time Spent: 3hrs.***
