@@ -66,5 +66,33 @@ Thank you for reading my horrible journal so far. I'll get started on the main p
 **Total Time Spent: 3hrs.**
 
 
-# May 16th: Time Spent: 3hrs
+# May 16th: Time Spent: 4hrs
+
+Tried my best to implement a network screen and stats screen, built ontop of the exsisting time partial refresh test. Used api key from openweathermap, and investigated how the touch work.
+
+cpu temp is measured with vcgencmd 
+and ram is measure with free
+
+At first, there was no touch debounce and it was constantly polling the cpu instead of checking the INT pins for touch, which lead to multiple touches being registered unintentionally. 
+
+by refrenching the original waveshare demo code, i was sucessfully able to implement debounce. (0.3s)
+
+Also, to prevent the refreshes from slowing down, touch_detection_thread() is started in a seprate thread, to prevent slow downs. 
+
+As this was my first time working with e-paper/e-ink displays, I was unaware that you need to do a full refresh after a set amount of paritals, as to avoid screen burn in. Im not too sure what to set it to, but I think 5 partials for every full refresh should be ok 🤞
+
+when touch is deteched, it prints the x,y coordinates in the terminal and then checks if its in the zone of the "button", which is defiend in the touch_detection_thread() 
+
+So far, easier than I expected, actually.
+
+here are some poorly taken pictures
+
+![network](img/network.png)
+![stats](img/stats.png)
+
+Time dosen't match up since I forgot to take photos that day :/
+
+
+***Time Spent: 4hrs.***
+**Total Time Spent: 7hrs.**
 
