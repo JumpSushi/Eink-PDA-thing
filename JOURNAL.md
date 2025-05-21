@@ -47,7 +47,7 @@ Well, after all that, finnaly got the demo to work. (yay!)
 
 ![my inability to read english](img/demo_code.JPG)
 
-Thank you for reading my horrible journal so far. I'll get started on the main programme tommorow
+Thank you for reading my horrible journal so far. I'll get started on the main program tommorow
 
 Time Spent: 3hrs.
 Total Time Spent: 3hrs.
