@@ -10,5 +10,3 @@ it's designed to run on a waveshare 2.9in touch E-Paper display.
 
 TP_lib that is undefined in the code is the driver for controlling touch and in charge of disaplaying data.
 It can be found at: https://files.waveshare.com/upload/4/4e/Touch_e-Paper_Code.zip
-
-Untitled.py is the main running script, I'll give it a better name, I promise.
