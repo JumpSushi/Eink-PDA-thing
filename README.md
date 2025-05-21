@@ -1,6 +1,6 @@
 Hello, World!
 
-My school recently banned phones and made us put it in a bag (like every sensible school), so i'm making this e-paper thing in "retailiation". It should be able to check:
+My school recently banned phones and made us put it in a bag (like every sensible school), so i'm making this e-paper thing in ~"retailiation"~. It should be able to check:
 
 Timetable (implemented)
 Bulletin  (implemented)
