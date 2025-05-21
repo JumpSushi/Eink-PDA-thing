@@ -36,7 +36,7 @@ wget https://files.waveshare.com/upload/4/4e/Touch_e-Paper_Code.zip
 unzip Touch_e-Paper_Code.zip -d Touch_e-Paper_Code
 ```
 
-However when I was running the demo, it kept on giving out epaper busy release.
+**However when I was running the demo, it kept on giving out epaper busy release.
 
 Well, after contacting waveshare support and getting instantly humbled, I realised I litterally cannot read english.
 
@@ -48,16 +48,11 @@ What I was running was actually the demo code for the 2.19 inch version of this 
 
 Well, after all that, finnaly got the demo to work. (yay!)
 
-![my inability to read english](img/demo_code.JPG)
-
-Thank you for reading my horrible journal so far. I'll get started on the main program tommorow
-
-Time Spent: 3hrs.
-Total Time Spent: 3hrs.
+![my inability to read english](img/demo_code.JPG)**
 
 
-After that, made a quick python file that shows the time, to test the partial refresh ability of the screen.
-(it works!)
+**After that, made a quick python file that shows the time, to test the partial refresh ability of the screen.
+(it works!)**
 
 <video width="100%" controls>
   <source src="img/partial.mp4" type="video/mp4">
