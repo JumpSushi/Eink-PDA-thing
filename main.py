@@ -34,6 +34,36 @@ except ImportError:
     bulletin_thread_function = None
     render_bulletin_screen = None
 
+# Import display utilities to reduce code duplication
+try:
+    from display_utils import (
+        has_time_changed,
+        apply_display_rotation,
+        draw_header_bar,
+        draw_navigation_button
+    )
+except ImportError:
+    # Define fallback functions if display_utils is not available
+    def has_time_changed(current_minute, last_minute, current_second):
+        return current_minute != last_minute or (current_second < 2 and last_minute == current_minute)
+    
+    def apply_display_rotation(image, config):
+        if config and config.get('display_rotation') == 180:
+            return image.rotate(180)
+        return image
+    
+    def draw_header_bar(draw, epd, fonts, current_time, current_date):
+        _, _, font_sm, _ = fonts
+        draw.rectangle([(0, 0), (epd.height, 15)], outline=0, fill=0)
+        draw.text((5, 1), current_time, font=font_sm, fill=255)
+        draw.text((epd.height//2 - 10, 1), "|", font=font_sm, fill=255)
+        draw.text((epd.height//2, 1), current_date, font=font_sm, fill=255)
+    
+    def draw_navigation_button(draw, fonts, x1, y1, x2, y2, text, fill_color=0, text_color=255):
+        _, _, _, font_xs = fonts
+        draw.rectangle([(x1, y1), (x2, y2)], outline=0, fill=fill_color)
+        draw.text((x1 + 3, y1 + 1), text, font=font_xs, fill=text_color)
+
 # Setup font directories
 fontdir = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'pic')
 fonts_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'fonts')
@@ -89,6 +119,47 @@ def load_config():
         return {'weather_enabled': False}
 
 config = load_config()
+
+def render_current_screen(current_screen, fonts, network_info, timetable_data, bulletin_items, 
+                          bulletin_scroll_position, bulletin_selected_item, bulletin_content_scroll_position,
+                          weather_data, stats, current_time, last_network_update, network_update_interval):
+    """Render the current screen based on screen state
+    
+    Returns:
+        tuple: (image, updated_network_info, updated_last_network_update)
+    """
+    if current_screen == NETWORK_INFO_SCREEN:
+        # Only update network info if it's been more than the update interval
+        if current_time - last_network_update > network_update_interval:
+            logging.info("Updating network information")
+            network_info = get_network_info()
+            last_network_update = current_time
+        
+        image = draw_network_info_screen(fonts, network_info)
+    elif current_screen == TIMETABLE_SCREEN:
+        # Timetable screen - use current timetable data
+        if timetable_data is not None:
+            # Get current time and date for the top bar
+            now = time.localtime()
+            current_time_str = time.strftime("%H:%M", now)
+            current_date_str = time.strftime("%d/%m/%Y", now)
+            
+            image = draw_timetable_screen(fonts, timetable_data, current_time_str, current_date_str)
+        else:
+            # Fallback if timetable data is not available
+            image = draw_network_info_screen(fonts, network_info)
+            logging.warning("Timetable data not available, showing network screen instead")
+    elif current_screen == BULLETIN_SCREEN:
+        # Bulletin screen - use the latest bulletin items from the thread
+        image = draw_bulletin_screen(fonts, bulletin_items,
+                                   scroll_position=bulletin_scroll_position,
+                                   selected_item=bulletin_selected_item,
+                                   content_scroll_position=bulletin_content_scroll_position)
+    else:
+        # Main screen - draw with latest time and stats
+        image = draw_time_image(fonts, weather_data, stats)
+    
+    return image, network_info, last_network_update
 
 # Touch variables
 current_screen = NETWORK_INFO_SCREEN
@@ -221,10 +292,7 @@ def draw_time_image(fonts, weather_data, stats):
     draw.rectangle([(250, 0), (295, 127)], outline=0) # Button border
     draw.text((255, 60), "Info", font=font_sm, fill=0)   # Button text
     
-    if config.get('display_rotation') == 180:
-        image = image.rotate(180)
-    
-    return image
+    return apply_display_rotation(image, config)
 
 def get_network_info():
     """Get network information including WiFi SSID, IP address, and hostname."""
@@ -539,11 +607,7 @@ def draw_network_info_screen(fonts, network_info):
     draw.rectangle([(250, 0), (295, 127)], outline=0)
     draw.text((255, 60), "Next", font=font_sm, fill=0)
     
-    # Apply rotation if needed
-    if config.get('display_rotation') == 180:
-        image = image.rotate(180)
-    
-    return image
+    return apply_display_rotation(image, config)
 
 def draw_timetable_screen(fonts, timetable_data, current_time=None, current_date=None):
     """Draw the timetable screen with week/schedule info on left and timetable on right"""
@@ -558,14 +622,10 @@ def draw_timetable_screen(fonts, timetable_data, current_time=None, current_date
         current_date = time.strftime("%d/%m/%Y", now)
     
     # Create a header with time and date in a top bar
-    draw.rectangle([(0, 0), (epd.height, 15)], outline=0, fill=0)
-    draw.text((5, 1), current_time, font=font_sm, fill=255)  # Back to original smaller font
-    draw.text((epd.height//2 - 10, 1), "|", font=font_sm, fill=255)
-    draw.text((epd.height//2, 1), current_date, font=font_sm, fill=255)
+    draw_header_bar(draw, epd, fonts, current_time, current_date)
     
     # Make the Next button smaller and more stylish in the top right
-    draw.rectangle([(270, 0), (295, 15)], outline=0, fill=0)
-    draw.text((273, 1), "Next", font=font_xs, fill=255)
+    draw_navigation_button(draw, fonts, 270, 0, 295, 15, "Next")
     
     # Define left and right section areas
     left_section_width = 100  # Width for the left section
@@ -739,11 +799,7 @@ def draw_timetable_screen(fonts, timetable_data, current_time=None, current_date
         # Move to the next row
         right_y += row_height
     
-    # Apply rotation if needed
-    if config.get('display_rotation') == 180:
-        image = image.rotate(180)
-    
-    return image
+    return apply_display_rotation(image, config)
 
 # Bulletin thread variables
 bulletin_thread_running = True
@@ -911,37 +967,11 @@ def main():
                 touch_event.clear()
                 
                 # Redraw screen based on current screen state
-                if current_screen == NETWORK_INFO_SCREEN:
-                    # Only update network info if it's been more than the update interval
-                    if current_time - last_network_update > network_update_interval:
-                        logging.info("Updating network information")
-                        network_info = get_network_info()
-                        last_network_update = current_time
-                    
-                    image = draw_network_info_screen(fonts, network_info)
-                elif current_screen == TIMETABLE_SCREEN:
-                    # Timetable screen - use current timetable data
-                    if timetable_data is not None:
-                        # Get current time and date for the top bar
-                        now = time.localtime()
-                        current_time_str = time.strftime("%H:%M", now)
-                        current_date_str = time.strftime("%d/%m/%Y", now)
-                        
-                        image = draw_timetable_screen(fonts, timetable_data, current_time_str, current_date_str)
-                    else:
-                        # Fallback if timetable data is not available
-                        image = draw_network_info_screen(fonts, network_info)
-                        logging.warning("Timetable data not available, showing network screen instead")
-                elif current_screen == BULLETIN_SCREEN:
-                    # Bulletin screen - use the latest bulletin items from the thread
-                    # We don't need to fetch here as the thread will keep the data updated
-                    image = draw_bulletin_screen(fonts, bulletin_items,
-                                               scroll_position=bulletin_scroll_position,
-                                               selected_item=bulletin_selected_item,
-                                               content_scroll_position=bulletin_content_scroll_position)
-                else:
-                    # Main screen - draw with latest time and stats
-                    image = draw_time_image(fonts, weather_data, stats)
+                image, network_info, last_network_update = render_current_screen(
+                    current_screen, fonts, network_info, timetable_data, bulletin_items,
+                    bulletin_scroll_position, bulletin_selected_item, bulletin_content_scroll_position,
+                    weather_data, stats, current_time, last_network_update, network_update_interval
+                )
                 
                 # Increment partial refresh counter for screen transition
                 partial_refresh_count += 1
@@ -963,83 +993,6 @@ def main():
                 weather_data = get_weather()
                 last_weather_update = current_time
             
-            # Check for touch event
-            if touch_event.is_set():
-                touch_event.clear()
-                
-                # Redraw screen based on current screen state
-                if current_screen == NETWORK_INFO_SCREEN:
-                    # Only update network info if it's been more than the update interval
-                    if current_time - last_network_update > network_update_interval:
-                        logging.info("Updating network information")
-                        network_info = get_network_info()
-                        last_network_update = current_time
-                    
-                    image = draw_network_info_screen(fonts, network_info)
-                    
-                    # Increment partial refresh counter for screen transition
-                    partial_refresh_count += 1
-                elif current_screen == TIMETABLE_SCREEN:
-                    # Timetable screen - draw with latest timetable data
-                    if timetable_data:
-                        image = draw_timetable_screen(fonts, timetable_data)
-                    else:
-                        # Fallback if timetable data is not available
-                        logging.warning("No timetable data available, showing network screen instead")
-                        image = draw_network_info_screen(fonts, network_info)
-                    
-                    # Increment partial refresh counter for screen transition
-                    partial_refresh_count += 1
-                elif current_screen == BULLETIN_SCREEN:
-                    # Bulletin screen - use the latest bulletin items from the thread
-                    # We don't need to fetch here as the thread will keep the data updated
-                    
-                    # Get current state before update
-                    previous_selected_item = bulletin_selected_item
-                    
-                    # Draw new bulletin screen image
-                    image = draw_bulletin_screen(fonts, bulletin_items,
-                                               scroll_position=bulletin_scroll_position,
-                                               selected_item=bulletin_selected_item,
-                                               content_scroll_position=bulletin_content_scroll_position)
-                    
-                    # Check if we entered or exited an article view
-                    if (previous_selected_item is None and bulletin_selected_item is not None) or \
-                       (previous_selected_item is not None and bulletin_selected_item is None):
-                        # Article selection state changed - use full refresh
-                        logging.info("Full refresh - entering or exiting bulletin article")
-                        epd.display_Base(epd.getbuffer(image))
-                        partial_refresh_count = 0  # Reset counter
-                    else:
-                        # Normal bulletin navigation - always use partial refresh
-                        logging.info("Partial refresh - bulletin navigation")
-                        epd.display_Partial(epd.getbuffer(image))
-                        # Don't increment partial_refresh_count for bulletin scrolling
-                else:
-                    # Main screen - draw with latest time and stats
-                    image = draw_time_image(fonts, weather_data, stats)
-                    
-                    # Increment partial refresh counter for screen transition
-                    partial_refresh_count += 1
-                
-                # Do a full refresh much less frequently to protect the display
-                # Exception for bulletin screen - we've already handled its refresh logic above
-                # Also force a full refresh when entering/leaving bulletin screen
-                if force_full_refresh:
-                    logging.info(f"Full refresh - entering or leaving bulletin screen")
-                    epd.display_Base(epd.getbuffer(image))
-                    partial_refresh_count = 0  # Reset counter
-                    force_full_refresh = False  # Reset flag
-                elif current_screen != BULLETIN_SCREEN and partial_refresh_count >= PARTIAL_REFRESHES_BEFORE_FULL:
-                    logging.info(f"Full refresh after {PARTIAL_REFRESHES_BEFORE_FULL} partial refreshes")
-                    epd.display_Base(epd.getbuffer(image))
-                    partial_refresh_count = 0  # Reset counter
-                elif current_screen != BULLETIN_SCREEN:
-                    # Use partial refresh for most updates to protect the display
-                    logging.info(f"Partial refresh ({partial_refresh_count}/{PARTIAL_REFRESHES_BEFORE_FULL})")
-                    epd.display_Partial(epd.getbuffer(image))
-                continue
-            
             # If on main screen, handle normal updates
             if current_screen == MAIN_SCREEN:
                 # Get current time components (do this once to avoid inconsistencies)
@@ -1048,7 +1001,7 @@ def main():
                 current_second = current_time_struct.tm_sec
                 
                 # Check if time changed (minute change or within first 2 seconds of the same minute)
-                time_changed = current_minute != last_minute or (current_second < 2 and last_minute == current_minute)
+                time_changed = has_time_changed(current_minute, last_minute, current_second)
                 
                 # Handle time updates (these count toward partial refresh counter)
                 if time_changed:
@@ -1086,7 +1039,7 @@ def main():
                 current_second = current_time_struct.tm_sec
                 
                 # Check if time changed
-                time_changed = current_minute != last_minute or (current_second < 2 and last_minute == current_minute)
+                time_changed = has_time_changed(current_minute, last_minute, current_second)
                 
                 # Update the screen if time changed
                 if time_changed:
@@ -1122,7 +1075,7 @@ def main():
                 current_second = current_time_struct.tm_sec
                 
                 # Check if time changed (minute change)
-                time_changed = current_minute != last_minute or (current_second < 2 and last_minute == current_minute)
+                time_changed = has_time_changed(current_minute, last_minute, current_second)
                 
                 # Update time display if needed
                 if time_changed:
@@ -1190,11 +1143,7 @@ def draw_bulletin_screen(fonts, bulletin_items, current_time=None, current_date=
         _, _, font_sm, _ = fonts  # Only font_sm is used in the fallback implementation
         draw.text((10, 50), "Bulletin module not available", font=font_sm, fill=0)
         
-        # Apply rotation if needed
-        if config.get('display_rotation') == 180:
-            image = image.rotate(180)
-        
-        return image
+        return apply_display_rotation(image, config)
 
 # Add the entry point at the end of the file
 if __name__ == '__main__':

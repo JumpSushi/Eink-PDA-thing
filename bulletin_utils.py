@@ -15,6 +15,21 @@ import datetime # Added import
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 
+# Import display utilities for shared functions
+try:
+    from display_utils import apply_display_rotation, draw_navigation_button
+except ImportError:
+    # Fallback if display_utils is not available
+    def apply_display_rotation(image, config):
+        if config and config.get('display_rotation') == 180:
+            return image.rotate(180)
+        return image
+    
+    def draw_navigation_button(draw, fonts, x1, y1, x2, y2, text, fill_color=0, text_color=255):
+        _, _, _, font_xs = fonts
+        draw.rectangle([(x1, y1), (x2, y2)], outline=0, fill=fill_color)
+        draw.text((x1 + 3, y1 + 1), text, font=font_xs, fill=text_color)
+
 # Global cache variables
 cached_bulletin_items = None
 last_bulletin_update_time = None
@@ -562,8 +577,7 @@ def draw_bulletin_screen(epd, fonts, bulletin_items, current_time=None, current_
         draw.text((epd.height//2, 1), current_date, font=font_sm, fill=255)
     
     # Make the Next button in the top right
-    draw.rectangle([(270, 0), (295, 15)], outline=0, fill=0)
-    draw.text((273, 1), "Next", font=font_xs, fill=255)
+    draw_navigation_button(draw, fonts, 270, 0, 295, 15, "Next")
     
     # Add a bulletin title - but only on the first page (when scroll_position is 0)
     # Smaller title that only appears on first page when no item is selected
@@ -804,8 +818,4 @@ def draw_bulletin_screen(epd, fonts, bulletin_items, current_time=None, current_
                 draw.text((15, y_pos), content_preview, font=font_xs, fill=0)
                 y_pos += 22  # Slightly reduced space between items with rectangle
     
-    # Apply rotation if needed
-    if config and config.get('display_rotation') == 180:
-        image = image.rotate(180)
-    
-    return image
+    return apply_display_rotation(image, config)
