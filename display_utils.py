@@ -7,7 +7,11 @@ Common helper functions for e-ink display rendering to reduce code duplication.
 """
 
 def has_time_changed(current_minute, last_minute, current_second):
-    """Check if the time has changed (minute change or within first 2 seconds of the same minute)
+    """Check if the time has changed (minute change or within first 2 seconds of any minute)
+    
+    This ensures the display updates when:
+    1. The minute actually changes (current_minute != last_minute)
+    2. We're in the first 2 seconds of any minute (to catch boundary updates)
     
     Args:
         current_minute: Current minute value
@@ -15,9 +19,9 @@ def has_time_changed(current_minute, last_minute, current_second):
         current_second: Current second value
         
     Returns:
-        bool: True if time has changed
+        bool: True if time has changed or we're in first 2 seconds
     """
-    return current_minute != last_minute or (current_second < 2 and last_minute == current_minute)
+    return current_minute != last_minute or current_second < 2
 
 def apply_display_rotation(image, config):
     """Apply display rotation if configured

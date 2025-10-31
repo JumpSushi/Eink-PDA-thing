@@ -45,7 +45,7 @@ try:
 except ImportError:
     # Define fallback functions if display_utils is not available
     def has_time_changed(current_minute, last_minute, current_second):
-        return current_minute != last_minute or (current_second < 2 and last_minute == current_minute)
+        return current_minute != last_minute or current_second < 2
     
     def apply_display_rotation(image, config):
         if config and config.get('display_rotation') == 180:
